@@ -1,0 +1,79 @@
+# goreleaser config — produces cross-compiled binaries, checksums, a GitHub
+# Release, and a Homebrew formula in a tap repo. Coexists with the Makefile
+# (which does manual cross-builds without git).
+#
+# Run locally (needs git + GITHUB_TOKEN):
+#   goreleaser release --clean
+# Dry-run (no upload):
+#   goreleaser release --snapshot --clean
+# Validate:
+#   goreleaser check
+version: 2
+
+project_name: agentic
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agentic
+    main: ./
+    binary: agentic
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.CommitDate}}
+
+archives:
+  - id: default
+    builds: [agentic]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - .env.example
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew tap — push a formula so users can `brew install dh-kam/tap/agentic`.
+# Requires HOMEBREW_TAP_GITHUB_TOKEN (a PAT with write to the tap repo) in CI.
+brews:
+  - name: agentic
+    repository:
+      owner: dh-kam
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/dh-kam/agentic
+    description: "GLM-compatible, Claude-Code-style coding agent in Go"
+    license: MIT
+    install: |
+      bin.install "agentic"
+    test: |
+      system "#{bin}/agentic", "--version"
+
+release:
+  github:
+    owner: dh-kam
+    name: agentic

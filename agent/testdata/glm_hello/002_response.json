@@ -1,0 +1,55 @@
+{
+  "id": "msg_202607282146464116f6fa386548e6",
+  "container": {
+    "id": "",
+    "expires_at": "0001-01-01T00:00:00Z"
+  },
+  "content": [
+    {
+      "citations": null,
+      "text": "## 요약\n\n`hello.txt` 파일은 **\"Hello, agentic world!\"라는 인사말과 함께, `read_file` 도구 동작 확인용으로 작성된 픽스처 파일**입니다.",
+      "type": "text",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "",
+      "input": null,
+      "name": "",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    }
+  ],
+  "model": "glm-5.2",
+  "role": "assistant",
+  "stop_details": {
+    "category": "",
+    "explanation": "",
+    "type": "refusal"
+  },
+  "stop_reason": "end_turn",
+  "stop_sequence": "",
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 1792,
+    "inference_geo": "",
+    "input_tokens": 75,
+    "output_tokens": 50,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": ""
+  }
+}

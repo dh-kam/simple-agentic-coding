@@ -1,0 +1,2 @@
+Hello, agentic world!
+이 파일은 read_file 도구 동작 확인용 픽스처입니다.
