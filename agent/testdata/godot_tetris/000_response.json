@@ -1,0 +1,55 @@
+{
+  "id": "msg_20260801001739ab837fe980154939",
+  "container": {
+    "id": "",
+    "expires_at": "0001-01-01T00:00:00Z"
+  },
+  "content": [
+    {
+      "citations": null,
+      "text": "1. Godot 프로젝트를 생성하고 메인 씬(Main)을 2D 노드로 생성한다.\n2. 블록 1칸의 기본 단위가 될 'Tile' 씬을 ColorRect 노드 또는 Sprite2D 노드로 만든다.\n3. 7가지 테트로미노스(I, O, T, S, Z, J, L) 모양을 2차원 배열 데이터로 정의한다.\n4. 메인 씬의 자식으로 게임 판의 크기(예: 10x20)를 관리할 TileMap 노드를 추가한다.\n5. 메인 씬에 게임 로직을 담당할 새 스크립트(예: `Main.gd`)를 작성하고 연결한다.\n6. 스크립트 내에 블록의 좌우 이동, 아래로 이동(소프트 드롭), 회전 로직을 구현한다.\n7. 키 입력이 없을 때 블록이 일정 시간마다 자동으로 낙하하도록 `Timer` 노드를 추가하고 시간을 제어하는 로직을 구현한다.\n8. 블록이 바닥이나 다른 블록에 닿았을 때 충돌 처리를 하고, 해당 블록을 게임 판에 고정시키는 로직을 작성한다.\n9. 블록이 고정될 때마다 가로줄이 꽉 찼는지 확인하여 줄 삭제 애니메이션 및 점수 획득 로직을 구현한다.\n10. 블록이 맵 최상단에 도달해 더 이상 생성할 수 없을 때의 게임 오버 처리 로직을 작성한다.\n11. 다음에 나올 블록을 미리 확인할 수 있는 `NextBlock` UI를 화면에 배치하고 연동한다.\n12. 작성한 씬을 실행하고 오류를 수정하며 블록 조작감, 충돌, 점수 시스템이 정상 작동하는지 테스트한다.",
+      "type": "text",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "",
+      "input": null,
+      "name": "",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    }
+  ],
+  "model": "glm-5.2",
+  "role": "assistant",
+  "stop_details": {
+    "category": "",
+    "explanation": "",
+    "type": "refusal"
+  },
+  "stop_reason": "end_turn",
+  "stop_sequence": "",
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "inference_geo": "",
+    "input_tokens": 147,
+    "output_tokens": 507,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": ""
+  }
+}

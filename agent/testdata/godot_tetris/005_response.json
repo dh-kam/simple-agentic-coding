@@ -1,0 +1,75 @@
+{
+  "id": "msg_20260801001808c9afc07ec2bd43e2",
+  "container": {
+    "id": "",
+    "expires_at": "0001-01-01T00:00:00Z"
+  },
+  "content": [
+    {
+      "citations": null,
+      "text": "## 3단계: NextBlock 프리뷰용 Tile 씬",
+      "type": "text",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "",
+      "input": null,
+      "name": "",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    },
+    {
+      "citations": null,
+      "text": "",
+      "type": "tool_use",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "call_2990052dcfce4c4bbd8842cd",
+      "input": {
+        "content": "[gd_scene load_steps=2 format=3 uid=\"uid://nextblock_scene\"]\n\n[node name=\"NextBlockPreview\" type=\"Control\"]\noffset_right = 120.0\noffset_bottom = 120.0\n\n[node name=\"Label\" type=\"Label\" parent=\".\"]\noffset_left = 0.0\noffset_top = 0.0\noffset_right = 120.0\noffset_bottom = 20.0\ntext = \"NEXT\"\n",
+        "path": "godot-tetris/NextBlockPreview.tscn"
+      },
+      "name": "write",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    }
+  ],
+  "model": "glm-5.2",
+  "role": "assistant",
+  "stop_details": {
+    "category": "",
+    "explanation": "",
+    "type": "refusal"
+  },
+  "stop_reason": "tool_use",
+  "stop_sequence": "",
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 3264,
+    "inference_geo": "",
+    "input_tokens": 224,
+    "output_tokens": 138,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": ""
+  }
+}
