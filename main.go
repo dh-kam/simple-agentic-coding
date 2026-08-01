@@ -137,6 +137,19 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Doctor diagnostic.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		fmt.Println(agent.RunDiagnostics(model, baseURL))
+		return
+	}
+
+	// Terminal setup.
+	if len(os.Args) > 1 && os.Args[1] == "terminal-setup" {
+		fmt.Println(agent.SetupTerminal())
+		return
+	}
+	}
+
 	mcpTools, mcpClients, mcpCatalog, mcpWarnings := loadMCP(context.Background())
 	for _, w := range mcpWarnings {
 		fmt.Fprintln(os.Stderr, cYellow+"⚠ mcp:"+cReset, w)
