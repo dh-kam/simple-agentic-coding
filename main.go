@@ -148,7 +148,6 @@ func main() {
 		fmt.Println(agent.SetupTerminal())
 		return
 	}
-	}
 
 	mcpTools, mcpClients, mcpCatalog, mcpWarnings := loadMCP(context.Background())
 	for _, w := range mcpWarnings {
