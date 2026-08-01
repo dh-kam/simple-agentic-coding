@@ -225,7 +225,7 @@ func (a *Agent) runOneTool(ctx context.Context, tc ChatToolCall) ChatMessage {
 	return ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: out, IsError: err != nil}
 }
 
-func (a *Agent) ToolDefs() []ToolDef []ToolDef {
+func (a *Agent) ToolDefs() []ToolDef {
 	defs := make([]ToolDef, 0, len(a.order))
 	for _, name := range a.order {
 		t := a.tools[name]
