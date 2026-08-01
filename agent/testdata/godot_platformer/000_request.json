@@ -1,0 +1,21 @@
+{
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Godot 4로 2D 플랫폼 게임을 만들어줘. 플레이어는 좌우 이동(화살표)과 점프(스페이스)가 가능하고 중력과 바닥 충돌이 있다. 플랫폼들을 뛰어넘어 목표 깃발에 도달하면 클리어. godot-platformer/ 폴더에 project.godot, Player.tscn, Player.gd, Level.tscn, Main.gd 모두 작성해줘.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "system": [
+    {
+      "text": "사용자의 요청을 해결하기 위한 실행 계획을 작성하라.\n규칙:\n- 도구를 호출하지 말고 텍스트로만 답한다.\n- 번호가 매겨진 간결한 단계 목록만 출력한다.\n- 각 단계는 구체적이고 실행 가능해야 한다 (무엇을 할지).\n- 코드나 셸 명령은 적지 않는다.",
+      "type": "text"
+    }
+  ]
+}

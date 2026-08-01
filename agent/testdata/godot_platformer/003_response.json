@@ -1,0 +1,58 @@
+{
+  "id": "msg_2026080109084951b9b38dafbd46c2",
+  "container": {
+    "id": "",
+    "expires_at": "0001-01-01T00:00:00Z"
+  },
+  "content": [
+    {
+      "citations": null,
+      "text": "",
+      "type": "tool_use",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "call_6ea6e7cabf25406d84ebe4cc",
+      "input": {
+        "content": "; Engine configuration file.\n; It's best edited using the editor UI and not directly,\n; since the parameters that go here are not all obvious.\n;\n; Format:\n;   [section] ; a comment goes here\n;\n;   param=value ; assign a value to a parameter\n\nconfig_version=5\n\n[application]\n\nconfig/name=\"2D Platformer\"\nconfig/description=\"A simple 2D platformer in Godot 4\"\nrun/main_scene=\"res://Level.tscn\"\nconfig/features=PackedStringArray(\"4.3\", \"GL Compatibility\")\nconfig/icon=\"res://icon.svg\"\n\n[input]\n\nmove_left={\n\"deadzone\": 0.5,\n\"events\": [Object(InputEventKey,\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0,\"alt_pressed\":false,\"shift_pressed\":false,\"ctrl_pressed\":false,\"meta_pressed\":false,\"pressed\":false,\"keycode\":0,\"physical_keycode\":4194319,\"key_label\":0,\"unicode\":4194319,\"location\":0,\"echo\":false,\"script\":null)\n, Object(InputEventKey,\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0,\"alt_pressed\":false,\"shift_pressed\":false,\"ctrl_pressed\":false,\"meta_pressed\":false,\"pressed\":false,\"keycode\":0,\"physical_keycode\":65,\"key_label\":0,\"unicode\":97,\"location\":0,\"echo\":false,\"script\":null)\n]\nmove_right={\n\"deadzone\": 0.5,\n\"events\": [Object(InputEventKey,\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0,\"alt_pressed\":false,\"shift_pressed\":false,\"ctrl_pressed\":false,\"meta_pressed\":false,\"pressed\":false,\"keycode\":0,\"physical_keycode\":4194321,\"key_label\":0,\"unicode\":4194321,\"location\":0,\"echo\":false,\"script\":null)\n, Object(InputEventKey,\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0,\"alt_pressed\":false,\"shift_pressed\":false,\"ctrl_pressed\":false,\"meta_pressed\":false,\"pressed\":false,\"keycode\":0,\"physical_keycode\":68,\"key_label\":0,\"unicode\":100,\"location\":0,\"echo\":false,\"script\":null)\n]\njump={\n\"deadzone\": 0.5,\n\"events\": [Object(InputEventKey,\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0,\"alt_pressed\":false,\"shift_pressed\":false,\"ctrl_pressed\":false,\"meta_pressed\":false,\"pressed\":false,\"keycode\":0,\"physical_keycode\":32,\"key_label\":0,\"unicode\":32,\"location\":0,\"echo\":false,\"script\":null)\n]\n}\n\n[rendering]\n\nrenderer/rendering_method=\"gl_compatibility\"\nrenderer/rendering_method.mobile=\"gl_compatibility\"\n",
+        "path": "godot-platformer/project.godot"
+      },
+      "name": "write",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    }
+  ],
+  "model": "glm-5.2",
+  "role": "assistant",
+  "stop_details": {
+    "category": "",
+    "explanation": "",
+    "type": "refusal"
+  },
+  "stop_reason": "tool_use",
+  "stop_sequence": "",
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 2368,
+    "inference_geo": "",
+    "input_tokens": 85,
+    "output_tokens": 641,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": ""
+  }
+}

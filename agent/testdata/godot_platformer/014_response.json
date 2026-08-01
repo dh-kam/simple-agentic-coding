@@ -1,0 +1,74 @@
+{
+  "id": "msg_2026080109105175726f723a5b443d",
+  "container": {
+    "id": "",
+    "expires_at": "0001-01-01T00:00:00Z"
+  },
+  "content": [
+    {
+      "citations": null,
+      "text": "이제 project.godot의 기본 중력 설정이 정의되어 있는지 확인하고, Godot 기본값이 명시적으로 들어가도록 보강하겠습니다. 그리고 icon.svg도 추가합니다.",
+      "type": "text",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "",
+      "input": null,
+      "name": "",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    },
+    {
+      "citations": null,
+      "text": "",
+      "type": "tool_use",
+      "signature": "",
+      "thinking": "",
+      "data": "",
+      "id": "call_2663deeef1264cb49d9b81ac",
+      "input": {
+        "path": "godot-platformer/project.godot"
+      },
+      "name": "read_file",
+      "content": {
+        "OfWebSearchResultBlockArray": null,
+        "error_code": "",
+        "type": "web_search_tool_result_error"
+      },
+      "tool_use_id": ""
+    }
+  ],
+  "model": "glm-5.2",
+  "role": "assistant",
+  "stop_details": {
+    "category": "",
+    "explanation": "",
+    "type": "refusal"
+  },
+  "stop_reason": "tool_use",
+  "stop_sequence": "",
+  "type": "message",
+  "usage": {
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 5696,
+    "inference_geo": "",
+    "input_tokens": 167,
+    "output_tokens": 68,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_fetch_requests": 0,
+      "web_search_requests": 0
+    },
+    "service_tier": ""
+  }
+}

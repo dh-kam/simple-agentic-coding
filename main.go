@@ -101,7 +101,7 @@ func main() {
 	}
 
 	ag := agent.BuildCodingAssistant(client, model, system, base,
-		agent.WithMaxTokens(4096),
+		agent.WithMaxTokens(16384),
 		agent.WithMaxContextTokens(maxCtx),
 		agent.WithPlanner(agent.NewLLMPlanner(client, model)),
 		agent.WithOnPlan(func(p string) {
