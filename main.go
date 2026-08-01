@@ -26,7 +26,13 @@ import (
 	"github.com/dh-kam/simple-agentic-coding/mcp"
 	"github.com/dh-kam/simple-agentic-coding/tui"
 
+	"net/http"
+
 	"github.com/aymanbagabas/go-udiff"
+
+	"github.com/dh-kam/simple-agentic-coding/capture"
+
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/charmbracelet/glamour"
 	"github.com/joho/godotenv"
 )
@@ -51,6 +57,15 @@ const (
 	cReset  = "\033[0m"
 )
 
+// makeClient creates an AnthropicClient, optionally with HAR capture transport.
+func makeClient(apiKey, baseURL string, har *capture.Transport) *agent.AnthropicClient {
+	if har != nil {
+		httpClient := &http.Client{Transport: har}
+		return agent.NewAnthropicClient(apiKey, baseURL, option.WithHTTPClient(httpClient))
+	}
+	return agent.NewAnthropicClient(apiKey, baseURL)
+}
+
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("agentic %s (commit %s, %s)\n", version, commit, date)
@@ -64,6 +79,15 @@ func main() {
 	}
 
 	_ = godotenv.Load()
+
+	// HAR capture: if AGENT_HAR_FILE is set, wrap the HTTP transport.
+	var harTransport *capture.Transport
+	if harPath := os.Getenv("AGENT_HAR_FILE"); harPath != "" {
+		harLog := &capture.HARLog{}
+		harTransport = capture.NewTransport(harLog)
+		defer harTransport.Save(harPath)
+		fmt.Fprintf(os.Stderr, cDim+"🗄  HAR capture → %s"+cReset+"\n", harPath)
+	}
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
@@ -115,7 +139,7 @@ func main() {
 	promptArgs := os.Args[1:]
 	if len(promptArgs) == 0 {
 		// No args → interactive TUI REPL.
-		if err := tui.Run(agent.NewAnthropicClient(apiKey, baseURL), model, base, extraTools, mcpSuffix+skillSummary); err != nil {
+		if err := tui.Run(makeClient(apiKey, baseURL, harTransport), model, base, extraTools, mcpSuffix+skillSummary); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -130,7 +154,7 @@ func main() {
 	task := strings.Join(promptArgs, " ")
 
 	// --- One-shot / ask mode ---
-	var client agent.LLMClient = agent.NewAnthropicClient(apiKey, baseURL)
+	var client agent.LLMClient = makeClient(apiKey, baseURL, harTransport)
 	if dir := os.Getenv("AGENT_RECORD_DIR"); dir != "" {
 		rec, err := agent.NewRecorder(client, dir)
 		if err != nil {

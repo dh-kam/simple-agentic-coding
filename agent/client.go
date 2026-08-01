@@ -9,26 +9,21 @@ import (
 )
 
 // AnthropicClient adapts the official Anthropic Go SDK to the LLMClient seam.
-// Point it at any Anthropic Messages-API compatible endpoint via baseURL —
-// first-party Anthropic (baseURL ""), or GLM Coding Plan
-// (baseURL "https://open.bigmodel.cn/api/anthropic").
 type AnthropicClient struct {
 	c anthropic.Client
 }
 
-// NewAnthropicClient builds a client. An empty baseURL uses the SDK default
-// (https://api.anthropic.com or the ANTHROPIC_BASE_URL env var).
-func NewAnthropicClient(apiKey, baseURL string) *AnthropicClient {
+// NewAnthropicClient builds a client. extra opts are appended after apiKey/baseURL
+// (use option.WithHTTPClient for HAR capture, proxies, etc.).
+func NewAnthropicClient(apiKey, baseURL string, extra ...option.RequestOption) *AnthropicClient {
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
+	opts = append(opts, extra...)
 	return &AnthropicClient{c: anthropic.NewClient(opts...)}
 }
 
-// StreamMessage drives a streaming Messages call, accumulates the full
-// response (so the returned *Message carries StopReason + tool_use blocks),
-// and forwards each text delta to onDelta when non-nil.
 func (a *AnthropicClient) StreamMessage(ctx context.Context, params anthropic.MessageNewParams, onDelta func(string)) (*anthropic.Message, error) {
 	stream := a.c.Messages.NewStreaming(ctx, params)
 	defer stream.Close()
@@ -40,7 +35,6 @@ func (a *AnthropicClient) StreamMessage(ctx context.Context, params anthropic.Me
 			return nil, fmt.Errorf("accumulate stream event: %w", err)
 		}
 		if onDelta != nil {
-			// surface text deltas for live UX
 			switch e := ev.AsAny().(type) {
 			case anthropic.ContentBlockDeltaEvent:
 				switch d := e.Delta.AsAny().(type) {
