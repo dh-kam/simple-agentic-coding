@@ -1,5 +1,5 @@
 dist/
 *.exe
 .env
-.agentic/
+.agentic/session.json
 simple-agentic-coding

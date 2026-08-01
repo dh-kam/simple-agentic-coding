@@ -89,11 +89,27 @@ func main() {
 	mcpSuffix := mcp.SummarizeResources(mcpCatalog)
 	system += mcpSuffix
 
+	// Load skills from AGENT_SKILLS_DIR (default .agentic/skills).
+	skillDir := os.Getenv("AGENT_SKILLS_DIR")
+	if skillDir == "" {
+		skillDir = ".agentic/skills"
+	}
+	skills, _ := agent.LoadSkills(skillDir)
+	skillSummary := agent.SkillSummary(skills)
+	system += skillSummary
+
+	// Build extra tools: MCP tools + skill loader.
+	extraTools := mcpTools
+	if len(skills) > 0 {
+		extraTools = append([]agent.Tool{}, mcpTools...)
+		extraTools = append(extraTools, agent.NewLoadSkillTool(skills))
+	}
+
 	// Determine the prompt. Support: "ask" subcommand, "-p" flag, or bare prompt.
 	promptArgs := os.Args[1:]
 	if len(promptArgs) == 0 {
 		// No args → interactive TUI REPL.
-		if err := tui.Run(agent.NewAnthropicClient(apiKey, baseURL), model, base, mcpTools, mcpSuffix); err != nil {
+		if err := tui.Run(agent.NewAnthropicClient(apiKey, baseURL), model, base, extraTools, mcpSuffix+skillSummary); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -147,14 +163,14 @@ func main() {
 			if err != nil {
 				fmt.Printf("  "+cRed+"✗ %s"+cReset+"\n\n", err)
 			} else {
-				fmt.Printf("  "+cGreen+"✓"+cReset+"\n\n")
+				fmt.Printf("  " + cGreen + "✓" + cReset + "\n\n")
 			}
 		}),
 		agent.WithChangeHook(func(path, oldContent, newContent string) {
 			printDiffCLI(path, oldContent, newContent)
 		}),
 	)
-	for _, t := range mcpTools {
+	for _, t := range extraTools {
 		ag.RegisterTool(t)
 	}
 	for _, name := range cfg.DisableTools {
