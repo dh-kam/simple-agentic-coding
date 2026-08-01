@@ -149,7 +149,7 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 			MaxTokens: a.maxTokens,
 			System:    a.system,
 			Messages:  a.messages,
-			Tools:     a.toolDefs(),
+			Tools:     a.ToolDefs(),
 		}, a.onText)
 		if err != nil {
 			return "", fmt.Errorf("llm call (iter %d): %w", iter, err)
@@ -225,7 +225,7 @@ func (a *Agent) runOneTool(ctx context.Context, tc ChatToolCall) ChatMessage {
 	return ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: out, IsError: err != nil}
 }
 
-func (a *Agent) toolDefs() []ToolDef {
+func (a *Agent) ToolDefs() []ToolDef []ToolDef {
 	defs := make([]ToolDef, 0, len(a.order))
 	for _, name := range a.order {
 		t := a.tools[name]
