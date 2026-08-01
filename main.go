@@ -57,6 +57,12 @@ func main() {
 		return
 	}
 
+	// Skills management subcommands (no API key needed).
+	if len(os.Args) > 1 && os.Args[1] == "skills" {
+		handleSkills(os.Args[2:])
+		return
+	}
+
 	_ = godotenv.Load()
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -254,6 +260,60 @@ func truncStr(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// handleSkills processes the `agentic skills` subcommand.
+func handleSkills(args []string) {
+	skillDir := os.Getenv("AGENT_SKILLS_DIR")
+	if skillDir == "" {
+		skillDir = ".agentic/skills"
+	}
+
+	if len(args) == 0 {
+		fmt.Println("Usage:")
+		fmt.Println("  agentic skills install <github-url>  Install a skill from GitHub")
+		fmt.Println("  agentic skills list                  List installed skills")
+		fmt.Println("  agentic skills remove <name>         Remove a skill")
+		fmt.Println()
+		agent.ListInstalledSkills(skillDir)
+		return
+	}
+
+	switch args[0] {
+	case "install":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: agentic skills install <github-url|owner/repo>")
+			os.Exit(1)
+		}
+		fmt.Printf("Installing from %s ...\n", args[1])
+		names, err := agent.InstallFromGitHub(args[1], skillDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, cRed+"✗ %s"+cReset+"\n", err)
+			os.Exit(1)
+		}
+		for _, n := range names {
+			fmt.Printf("  "+cGreen+"✓"+cReset+" installed: %s\n", n)
+		}
+		fmt.Printf("\n%d skill(s) installed. Run `agentic skills list` to verify.\n", len(names))
+
+	case "list":
+		agent.ListInstalledSkills(skillDir)
+
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: agentic skills remove <name>")
+			os.Exit(1)
+		}
+		if err := agent.RemoveSkill(skillDir, args[1]); err != nil {
+			fmt.Fprintf(os.Stderr, cRed+"✗ %s"+cReset+"\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("  "+cGreen+"✓"+cReset+" removed: %s\n", args[1])
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown skills command: %s\n", args[0])
+		os.Exit(1)
+	}
 }
 
 func loadMCP(ctx context.Context) ([]agent.Tool, []*mcp.Client, []mcp.ResourceRef, []string) {
