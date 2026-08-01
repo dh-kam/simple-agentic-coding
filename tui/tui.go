@@ -47,7 +47,7 @@ func Run(client *agent.AnthropicClient, modelName, base string, extraTools []age
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 
 	m.agent = agent.BuildCodingAssistant(client, modelName, system, base,
-		agent.WithMaxTokens(2048),
+		agent.WithMaxTokens(4096),
 		agent.WithMaxContextTokens(maxCtx),
 		agent.WithPlanner(agent.NewLLMPlanner(client, modelName)),
 		agent.WithOnText(func(s string) { m.send(deltaMsg{text: s}) }),
