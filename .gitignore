@@ -2,3 +2,4 @@ dist/
 *.exe
 .env
 .agentic/
+simple-agentic-coding
