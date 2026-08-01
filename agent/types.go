@@ -42,6 +42,7 @@ type ChatResponse struct {
 	Content    string         // text (may be empty if only tool calls)
 	ToolCalls  []ChatToolCall // tool invocations (empty if end_turn)
 	StopReason string         // "end_turn" | "tool_use"
+	Usage      Usage
 }
 
 // IsToolUse returns true if the response requests tool execution.
@@ -62,4 +63,10 @@ type Backend interface {
 	// Chat sends a request and returns the response. onDelta (if non-nil)
 	// receives text chunks as they stream in.
 	Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error)
+}
+
+// Usage tracks token consumption for cost tracking.
+type Usage struct {
+	InputTokens  int64
+	OutputTokens int64
 }

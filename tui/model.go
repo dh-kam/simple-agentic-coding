@@ -350,6 +350,31 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.refresh()
 		return m, nil
+	case "/cost":
+		m.entries = append(m.entries, &entry{kind: kindText, text: hintStyle.Render("💰 토큰 사용량 추적은 아직 개발 중입니다")})
+		m.refresh()
+		return m, nil
+	case "/status":
+		var sb strings.Builder
+		sb.WriteString(hintStyle.Render("📊 상태") + "\n")
+		sb.WriteString("  model: " + m.modelName + "\n")
+		sb.WriteString("  tools: " + fmt.Sprintf("%d", len(m.agent.toolDefs())) + "\n")
+		sb.WriteString("  messages: " + fmt.Sprintf("%d", len(m.agent.History())))
+		m.entries = append(m.entries, &entry{kind: kindText, text: sb.String()})
+		m.refresh()
+		return m, nil
+	case "/model":
+		m.entries = append(m.entries, &entry{kind: kindText, text: hintStyle.Render("🔄 모델 전환은 재시작 시 AGENT_MODEL env로 설정하세요: " + m.modelName)})
+		m.refresh()
+		return m, nil
+	case "/compact":
+		m.entries = append(m.entries, &entry{kind: kindText, text: hintStyle.Render("📦 컨텍스트 압축은 maxContextTokens 초과 시 자동 실행됩니다")})
+		m.refresh()
+		return m, nil
+	case "/mcp":
+		m.entries = append(m.entries, &entry{kind: kindText, text: hintStyle.Render("🔌 MCP 서버는 AGENT_MCP_CONFIG로 설정합니다")})
+		m.refresh()
+		return m, nil
 	default:
 		m.entries = append(m.entries, &entry{kind: kindText, text: errStyle.Render("알 수 없는 명령: " + text)})
 		m.refresh()

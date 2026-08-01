@@ -153,6 +153,8 @@ func main() {
 	skills, _ := agent.LoadSkills(skillDir)
 	skillSummary := agent.SkillSummary(skills)
 	system += skillSummary
+	// Load project memory (AGENTS.md / CLAUDE.md)
+	system += agent.LoadProjectMemory(base)
 
 	// Build extra tools: MCP tools + skill loader.
 	extraTools := mcpTools

@@ -67,6 +67,7 @@ type Agent struct {
 	onToolEnd        ToolEndFunc
 	changeHook       ChangeHook
 	initialUser      string
+	totalUsage       Usage
 	messages         []ChatMessage
 }
 
@@ -154,6 +155,8 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 			return "", fmt.Errorf("llm call (iter %d): %w", iter, err)
 		}
 
+		a.totalUsage.InputTokens += resp.Usage.InputTokens
+		a.totalUsage.OutputTokens += resp.Usage.OutputTokens
 		a.messages = append(a.messages, resp.ToAssistantMessage())
 
 		if !resp.IsToolUse() {
@@ -230,3 +233,5 @@ func (a *Agent) toolDefs() []ToolDef {
 	}
 	return defs
 }
+
+func (a *Agent) TotalUsage() Usage { return a.totalUsage }

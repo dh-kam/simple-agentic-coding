@@ -38,6 +38,7 @@ func Run(client agent.Backend, modelName, base string, extraTools []agent.Tool, 
 		system = cfg.SystemPrompt
 	}
 	system += systemSuffix
+	system += agent.LoadProjectMemory(base)
 	maxCtx := 50000
 	if cfg.MaxContextTokens > 0 {
 		maxCtx = cfg.MaxContextTokens

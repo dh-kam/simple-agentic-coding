@@ -403,6 +403,9 @@ func CCTools(base string, hook ChangeHook) ([]Tool, *[]Todo, *ShellRegistry) {
 		NewGrepTool(base),
 		NewListFilesTool(base),
 		NewWebFetchTool(15 * time.Second),
+		NewWebSearchTool(),
+		NewGitTool(),
+		NewGitCommitTool(),
 		todoTool,
 	}, todos, reg
 }
