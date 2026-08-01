@@ -200,10 +200,12 @@ AGENT_MCP_CONFIG=/tmp/mcp.json ./agentic ask 'echo 도구로 "MCP works!"를 에
 | 1 | 파일 생성 | write | ✅ |
 | 2 | 파일 수정 + diff | edit | ✅ |
 | 3 | 다중 파일 프로젝트 | write x N | ✅ |
-| 4 | 코드 검색 | glob, grep | ✅ | |
-| 5 | 명령 실행 | run_command | (스크립트 가능) |
+| 4 | 코드 검색 | glob, grep | ✅ |
+| 5 | 명령 실행 | run_command | ✅ |
 | 6 | 자기 수정 | write → edit | ✅ |
-| 7 | 컨텍스트 인식 | read_file → edit | ✅ | |
+| 7 | 컨텍스트 인식 | read_file → edit | ✅ |
 | 8 | 복잡한 계획 | planner + todo | ✅ |
-| 9 | 에러 복구 | read_file(실패) → write | (스크립트 가능) |
+| 9 | 에러 복구 | read_file(실패) → write | ✅ |
 | 10 | MCP 연동 | echo__echo | ✅ |
+
+**10/10 전체 통과** (2026-08-01)
