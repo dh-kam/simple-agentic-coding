@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -80,13 +81,21 @@ func main() {
 
 	_ = godotenv.Load()
 
-	// HAR capture: if AGENT_HAR_FILE is set, wrap the HTTP transport.
+	// HAR capture: default ON, saved to ~/.agentic/hars/session-<timestamp>.har
+	// Override path with AGENT_HAR_FILE; disable with AGENT_HAR_DISABLE=1.
 	var harTransport *capture.Transport
-	if harPath := os.Getenv("AGENT_HAR_FILE"); harPath != "" {
+	if os.Getenv("AGENT_HAR_DISABLE") != "1" {
+		harPath := os.Getenv("AGENT_HAR_FILE")
+		if harPath == "" {
+			home, _ := os.UserHomeDir()
+			harDir := filepath.Join(home, ".agentic", "hars")
+			os.MkdirAll(harDir, 0755)
+			harPath = filepath.Join(harDir, "session-"+time.Now().Format("20060102-150405")+".har")
+		}
 		harLog := &capture.HARLog{}
 		harTransport = capture.NewTransport(harLog)
 		defer harTransport.Save(harPath)
-		fmt.Fprintf(os.Stderr, cDim+"🗄  HAR capture → %s"+cReset+"\n", harPath)
+		fmt.Fprintf(os.Stderr, cDim+"🗄  HAR → %s"+cReset+"\n", harPath)
 	}
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
