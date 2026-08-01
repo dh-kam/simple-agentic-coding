@@ -358,7 +358,7 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		var sb strings.Builder
 		sb.WriteString(hintStyle.Render("📊 상태") + "\n")
 		sb.WriteString("  model: " + m.modelName + "\n")
-		sb.WriteString("  tools: " + fmt.Sprintf("%d", len(m.agent.toolDefs())) + "\n")
+		sb.WriteString("  tools: " + fmt.Sprintf("%d", len(m.agent.ToolDefs())) + "\n")
 		sb.WriteString("  messages: " + fmt.Sprintf("%d", len(m.agent.History())))
 		m.entries = append(m.entries, &entry{kind: kindText, text: sb.String()})
 		m.refresh()
