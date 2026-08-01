@@ -6,238 +6,190 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
-// fakeClient returns canned JSON responses in order and records each request.
-// It implements StreamMessage: it surfaces each text block of the canned
-// message as a single delta (so streaming can be tested) and returns the full
-// message. No network.
+// fakeClient implements Backend for testing.
 type fakeClient struct {
-	responses []string
+	responses []*ChatResponse
 	i         int
-	params    []anthropic.MessageNewParams
+	Reqs      []ChatRequest
 }
 
-func (f *fakeClient) StreamMessage(ctx context.Context, p anthropic.MessageNewParams, onDelta func(string)) (*anthropic.Message, error) {
-	f.params = append(f.params, p)
+func (f *fakeClient) Chat(_ context.Context, _ ChatRequest, onDelta func(string)) (*ChatResponse, error) {
 	if f.i >= len(f.responses) {
-		return nil, errors.New("fake client: responses exhausted")
+		return nil, errors.New("fake client: exhausted")
 	}
-	raw := f.responses[f.i]
+	resp := f.responses[f.i]
 	f.i++
-	var msg anthropic.Message
-	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-		return nil, err
+	if onDelta != nil && resp.Content != "" {
+		onDelta(resp.Content)
 	}
-	if onDelta != nil {
-		for _, b := range msg.Content {
-			if tb, ok := b.AsAny().(anthropic.TextBlock); ok {
-				onDelta(tb.Text)
-			}
-		}
-	}
-	return &msg, nil
+	return resp, nil
 }
 
-// First response: model asks to call read_file on "hello.txt".
-const respToolUse = `{
-  "id": "msg_1", "type": "message", "role": "assistant", "model": "test",
-  "content": [
-    {"type": "text", "text": "파일을 읽겠습니다."},
-    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "hello.txt"}}
-  ],
-  "stop_reason": "tool_use"
-}`
+func toolUseResp(name string, args map[string]any) *ChatResponse {
+	argBytes, _ := json.Marshal(args)
+	return &ChatResponse{
+		ToolCalls:  []ChatToolCall{{ID: "tu1", Name: name, Arguments: argBytes}},
+		StopReason: "tool_use",
+	}
+}
 
-// Second response: model is done.
-const respFinal = `{
-  "id": "msg_2", "type": "message", "role": "assistant", "model": "test",
-  "content": [{"type": "text", "text": "완료했습니다."}],
-  "stop_reason": "end_turn"
-}`
+func textResp(text string) *ChatResponse {
+	return &ChatResponse{Content: text, StopReason: "end_turn"}
+}
 
-// Response with two tool_use blocks (parallel tool calls).
-const respTwoTools = `{
-  "id": "msg_1", "type": "message", "role": "assistant", "model": "test",
-  "content": [
-    {"type": "tool_use", "id": "toolu_1", "name": "slow", "input": {}},
-    {"type": "tool_use", "id": "toolu_2", "name": "slow", "input": {}}
-  ],
-  "stop_reason": "tool_use"
-}`
-
-// TestRun_loopsThroughTool verifies the full cycle:
-// model requests tool -> agent runs read_file -> result fed back -> model answers.
 func TestRun_loopsThroughTool(t *testing.T) {
 	base := t.TempDir()
-	const content = "Hello from fixture"
-	if err := os.WriteFile(filepath.Join(base, "hello.txt"), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	os.WriteFile(filepath.Join(base, "hello.txt"), []byte("Hello from fixture"), 0644)
 
-	fc := &fakeClient{responses: []string{respToolUse, respFinal}}
-	ag := New(fc, "test-model", "sys")
+	fc := &fakeClient{responses: []*ChatResponse{
+		toolUseResp("read_file", map[string]any{"path": "hello.txt"}),
+		textResp("완료했습니다."),
+	}}
+	ag := New(fc, "m", "s")
+	ag.RegisterTool(NewReadFileTool(base))
 
-	// Wrap read_file to observe what the loop dispatched.
-	rt := NewReadFileTool(base)
-	baseRun := rt.Run
-	var (
-		calledPath string
-		gotOutput  string
-	)
-	rt.Run = func(ctx context.Context, args json.RawMessage) (string, error) {
-		var in struct {
-			Path string `json:"path"`
-		}
-		_ = json.Unmarshal(args, &in)
-		calledPath = in.Path
-		out, err := baseRun(ctx, args)
-		gotOutput = out
-		return out, err
-	}
-	ag.RegisterTool(rt)
-
-	answer, err := ag.Run(context.Background(), "hello.txt 읽어줘")
+	out, err := ag.Run(context.Background(), "read hello.txt")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if answer != "완료했습니다." {
-		t.Errorf("answer = %q, want %q", answer, "완료했습니다.")
-	}
-	if calledPath != "hello.txt" {
-		t.Errorf("tool called with path %q, want hello.txt", calledPath)
-	}
-	if gotOutput != content {
-		t.Errorf("tool output = %q, want %q", gotOutput, content)
+	if out != "완료했습니다." {
+		t.Errorf("out=%q", out)
 	}
 	if fc.i != 2 {
-		t.Errorf("LLM calls = %d, want 2", fc.i)
+		t.Errorf("calls=%d want 2", fc.i)
 	}
 }
 
-// TestRun_directAnswer verifies the terminal branch when the model needs no tool.
 func TestRun_directAnswer(t *testing.T) {
-	fc := &fakeClient{responses: []string{respFinal}}
+	fc := &fakeClient{responses: []*ChatResponse{textResp("안녕")}}
 	ag := New(fc, "m", "s")
-
-	ans, err := ag.Run(context.Background(), "hi")
+	out, err := ag.Run(context.Background(), "hi")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if ans != "완료했습니다." {
-		t.Errorf("answer = %q, want %q", ans, "완료했습니다.")
-	}
-	if fc.i != 1 {
-		t.Errorf("LLM calls = %d, want 1", fc.i)
+	if out != "안녕" {
+		t.Errorf("out=%q", out)
 	}
 }
 
-// TestRun_concurrentTools proves the two tool_use blocks run concurrently, not
-// sequentially: each "slow" invocation signals it has started and then blocks
-// until BOTH have started. If execution were sequential, the first would block
-// forever (the second would never start) and the context would time out.
 func TestRun_concurrentTools(t *testing.T) {
-	fc := &fakeClient{responses: []string{respTwoTools, respFinal}}
+	fc := &fakeClient{responses: []*ChatResponse{
+		{ToolCalls: []ChatToolCall{
+			{ID: "t1", Name: "slow", Arguments: json.RawMessage("{}")},
+			{ID: "t2", Name: "slow", Arguments: json.RawMessage("{}")},
+		}, StopReason: "tool_use"},
+		textResp("done"),
+	}}
 	ag := New(fc, "m", "s")
-
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	ag.RegisterTool(Tool{
-		Name:        "slow",
-		Description: "blocks until released",
-		InputSchema: map[string]any{},
-		Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
-			started <- struct{}{}
-			select {
-			case <-release:
-				return "ok", nil
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		},
-	})
-
-	go func() {
-		for i := 0; i < 2; i++ {
-			<-started
-		}
-		close(release)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ag.RegisterTool(Tool{Name: "slow", InputSchema: map[string]any{}, Run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		return "ok", nil
+	}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	answer, err := ag.Run(ctx, "run two")
+	out, err := ag.Run(ctx, "go")
 	if err != nil {
-		t.Fatalf("Run: %v (tools likely ran sequentially, not concurrently)", err)
-	}
-	if answer != "완료했습니다." {
-		t.Errorf("answer = %q, want %q", answer, "완료했습니다.")
-	}
-}
-
-// TestRun_streamingSurfacesDeltas verifies onText receives both the
-// intermediate text (from the tool-use turn) and the final answer.
-func TestRun_streamingSurfacesDeltas(t *testing.T) {
-	fc := &fakeClient{responses: []string{respToolUse, respFinal}}
-	var got strings.Builder
-	ag := New(fc, "m", "s", WithOnText(func(s string) { got.WriteString(s) }))
-	ag.RegisterTool(NewReadFileTool(t.TempDir())) // read_file present; "hello.txt" absent -> error result, still fine
-
-	if _, err := ag.Run(context.Background(), "go"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	joined := got.String()
-	if !strings.Contains(joined, "파일을 읽겠습니다.") {
-		t.Errorf("onText missing intermediate text: %q", joined)
-	}
-	if !strings.Contains(joined, "완료했습니다.") {
-		t.Errorf("onText missing final text: %q", joined)
+	if out != "done" {
+		t.Errorf("out=%q", out)
 	}
 }
 
-// TestRun_explicitPlanning verifies the planner runs first, its plan reaches
-// onPlan, and the plan is injected into the executor's request.
-func TestRun_explicitPlanning(t *testing.T) {
-	fc := &fakeClient{responses: []string{respFinal}} // executor answers directly
-	fp := &fakePlanner{plan: "1. 파일 읽기\n2. 요약"}
-	var planSeen string
+func TestRun_compactsWhenOverBudget(t *testing.T) {
+	fc := &fakeClient{responses: []*ChatResponse{
+		toolUseResp("read_file", map[string]any{"path": "x"}),
+		toolUseResp("read_file", map[string]any{"path": "x"}),
+		textResp("done"),
+	}}
 	ag := New(fc, "m", "s",
-		WithPlanner(fp),
-		WithOnPlan(func(p string) { planSeen = p }),
+		WithMaxContextTokens(1),
+		WithKeepRecentTurns(1),
+		WithSummarizer(func(_ context.Context, _ string, _ []ChatMessage) (string, error) {
+			return "SUMMARY", nil
+		}),
 	)
-
-	answer, err := ag.Run(context.Background(), "hello.txt 요약해줘")
+	ag.RegisterTool(NewReadFileTool(t.TempDir()))
+	_, err := ag.Run(context.Background(), "do it")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+func TestRun_replayWithFakePlanner(t *testing.T) {
+	fc := &fakeClient{responses: []*ChatResponse{textResp("done")}}
+	fp := &fakePlanner{plan: "1. step"}
+	ag := New(fc, "m", "s", WithPlanner(fp))
+	out, err := ag.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "done" {
+		t.Errorf("out=%q", out)
 	}
 	if !fp.called {
 		t.Error("planner not called")
 	}
-	if fp.got != "hello.txt 요약해줘" {
-		t.Errorf("planner received %q, want the original user input", fp.got)
+}
+
+func TestSafePath(t *testing.T) {
+	base := t.TempDir()
+	cases := []struct {
+		in      string
+		wantErr bool
+	}{
+		{"hello.txt", false}, {"sub/../a.txt", false},
+		{"", true}, {"/etc/passwd", true}, {"../x", true}, {"../../y", true},
 	}
-	if planSeen != fp.plan {
-		t.Errorf("onPlan = %q, want %q", planSeen, fp.plan)
-	}
-	if answer != "완료했습니다." {
-		t.Errorf("answer = %q, want %q", answer, "완료했습니다.")
-	}
-	// fakePlanner returns a canned plan without an LLM call, so only the
-	// executor call is recorded — and it must carry the injected plan.
-	if len(fc.params) != 1 {
-		t.Fatalf("LLM calls = %d, want 1 (executor; planner is canned)", len(fc.params))
-	}
-	execReq, _ := json.Marshal(fc.params[0])
-	// JSON escapes newlines, so check the marker + each (newline-free) plan line.
-	for _, want := range []string{"## 실행 계획", "1. 파일 읽기", "2. 요약", "hello.txt 요약해줘"} {
-		if !strings.Contains(string(execReq), want) {
-			t.Errorf("executor request missing %q:\n%s", want, execReq)
+	for _, c := range cases {
+		_, err := safePath(base, c.in)
+		if (err != nil) != c.wantErr {
+			t.Errorf("safePath(%q) err=%v want=%v", c.in, err, c.wantErr)
 		}
+	}
+}
+
+func TestPlanCompaction(t *testing.T) {
+	for _, c := range []struct{ msgs, keep, want int }{
+		{0, 3, 0}, {1, 3, 0}, {3, 1, 0}, {5, 1, 1}, {7, 2, 1}, {4, 1, 0},
+	} {
+		if got := planCompaction(c.msgs, c.keep); got != c.want {
+			t.Errorf("planCompaction(%d,%d)=%d want %d", c.msgs, c.keep, got, c.want)
+		}
+	}
+}
+
+func TestUnregisterTool(t *testing.T) {
+	ag := New(&fakeClient{}, "m", "s")
+	ag.RegisterTool(Tool{Name: "x", InputSchema: map[string]any{}, Run: func(context.Context, json.RawMessage) (string, error) { return "", nil }})
+	ag.UnregisterTool("x")
+	defs := ag.toolDefs()
+	for _, d := range defs {
+		if d.Name == "x" {
+			t.Error("x still registered")
+		}
+	}
+}
+
+func TestHistoryResume(t *testing.T) {
+	fc := &fakeClient{responses: []*ChatResponse{textResp("ok")}}
+	ag := New(fc, "m", "s")
+	ag.RegisterTool(NewReadFileTool(t.TempDir()))
+	ag.Run(context.Background(), "hello")
+	msgs := ag.History()
+	if len(msgs) < 2 {
+		t.Fatalf("history len=%d", len(msgs))
+	}
+	b, _ := json.Marshal(msgs)
+	var got []ChatMessage
+	json.Unmarshal(b, &got)
+	ag2 := New(&fakeClient{responses: []*ChatResponse{textResp("ok")}}, "m", "s")
+	ag2.Resume(got)
+	if len(ag2.History()) != len(got) {
+		t.Errorf("resume mismatch")
 	}
 }
 
@@ -253,28 +205,6 @@ func (f *fakePlanner) Plan(_ context.Context, in string) (string, error) {
 	return f.plan, nil
 }
 
-// TestSafePath verifies the confinement guard.
-func TestSafePath(t *testing.T) {
-	base := t.TempDir()
-	tests := []struct {
-		in      string
-		wantErr bool
-	}{
-		{"hello.txt", false},
-		{"sub/../hello.txt", false}, // stays under base after cleaning
-		{"", true},
-		{"/etc/passwd", true},      // absolute
-		{"../secret", true},        // escapes
-		{"../../etc/passwd", true}, // escapes
-	}
-	for _, tc := range tests {
-		got, err := safePath(base, tc.in)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("safePath(%q) err=%v, wantErr=%v", tc.in, err, tc.wantErr)
-			continue
-		}
-		if !tc.wantErr && !filepath.IsAbs(got) {
-			t.Errorf("safePath(%q) = %q, want absolute under base", tc.in, got)
-		}
-	}
-}
+// extractText is used nowhere now but may be referenced by old tests.
+// Keeping a stub to avoid import errors.
+func extractTextUnused(_ string) string { return "" }

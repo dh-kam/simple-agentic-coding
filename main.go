@@ -60,26 +60,26 @@ const (
 
 // makeClient creates an LLMClient based on AGENT_API (default: anthropic).
 // Supports: "anthropic" (Anthropic SDK) and "openai" (OpenAI-compatible API).
-func makeClient(apiKey, baseURL string, har *capture.Transport) agent.LLMClient {
+func makeClient(apiKey, baseURL string, har *capture.Transport) agent.Backend {
 	apiType := os.Getenv("AGENT_API")
 	if apiType == "" {
 		apiType = "anthropic"
 	}
 
-	// For Anthropic: use NewAnthropicClient (with optional HAR)
+	// For Anthropic: use NewAnthropicBackend (with optional HAR)
 	if apiType == "anthropic" {
 		if har != nil {
 			httpClient := &http.Client{Transport: har}
-			return agent.NewAnthropicClient(apiKey, baseURL, option.WithHTTPClient(httpClient))
+			return agent.NewAnthropicBackend(apiKey, baseURL, option.WithHTTPClient(httpClient))
 		}
-		return agent.NewAnthropicClient(apiKey, baseURL)
+		return agent.NewAnthropicBackend(apiKey, baseURL)
 	}
 
 	// For OpenAI: use NewOpenAIClient
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	c := agent.NewOpenAIClient(apiKey, baseURL)
+	c := agent.NewOpenAIBackend(apiKey, baseURL)
 	fmt.Fprintf(os.Stderr, cDim+"🔌 OpenAI backend: %s"+cReset+"\n", baseURL)
 	return c
 }
@@ -180,7 +180,7 @@ func main() {
 	task := strings.Join(promptArgs, " ")
 
 	// --- One-shot / ask mode ---
-	var client agent.LLMClient = makeClient(apiKey, baseURL, harTransport)
+	var client agent.Backend = makeClient(apiKey, baseURL, harTransport)
 	if dir := os.Getenv("AGENT_RECORD_DIR"); dir != "" {
 		rec, err := agent.NewRecorder(client, dir)
 		if err != nil {

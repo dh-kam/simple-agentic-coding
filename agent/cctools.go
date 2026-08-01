@@ -373,16 +373,14 @@ func NewTodoTool() (Tool, *[]Todo) {
 	}, store
 }
 
-// BuildCodingAssistant builds a coding-assistant Agent with the full tool set
-// (CCTools + task subagent) and applies extra options (hooks, compaction, …).
-// Shared by the one-shot CLI and the TUI so both run identical tools.
-func BuildCodingAssistant(client LLMClient, model, system, base string, extra ...Option) *Agent {
-	ag := New(client, model, system, extra...)
+// BuildCodingAssistant builds a coding-assistant Agent with the full tool set.
+func BuildCodingAssistant(backend Backend, model, system, base string, extra ...Option) *Agent {
+	ag := New(backend, model, system, extra...)
 	tools, _, _ := CCTools(base, ag.changeHook)
 	for _, t := range tools {
 		ag.RegisterTool(t)
 	}
-	ag.RegisterTool(NewTaskTool(NewSubagentRunner(client, model, system, tools)))
+	ag.RegisterTool(NewTaskTool(NewSubagentRunner(backend, model, system, tools)))
 	return ag
 }
 

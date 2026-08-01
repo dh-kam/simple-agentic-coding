@@ -8,13 +8,11 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-// AnthropicClient adapts the official Anthropic Go SDK to the LLMClient seam.
+// AnthropicClient wraps the SDK for AnthropicBackend.
 type AnthropicClient struct {
 	c anthropic.Client
 }
 
-// NewAnthropicClient builds a client. extra opts are appended after apiKey/baseURL
-// (use option.WithHTTPClient for HAR capture, proxies, etc.).
 func NewAnthropicClient(apiKey, baseURL string, extra ...option.RequestOption) *AnthropicClient {
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {
@@ -27,18 +25,15 @@ func NewAnthropicClient(apiKey, baseURL string, extra ...option.RequestOption) *
 func (a *AnthropicClient) StreamMessage(ctx context.Context, params anthropic.MessageNewParams, onDelta func(string)) (*anthropic.Message, error) {
 	stream := a.c.Messages.NewStreaming(ctx, params)
 	defer stream.Close()
-
 	msg := anthropic.Message{}
 	for stream.Next() {
 		ev := stream.Current()
 		if err := msg.Accumulate(ev); err != nil {
-			return nil, fmt.Errorf("accumulate stream event: %w", err)
+			return nil, fmt.Errorf("accumulate: %w", err)
 		}
 		if onDelta != nil {
-			switch e := ev.AsAny().(type) {
-			case anthropic.ContentBlockDeltaEvent:
-				switch d := e.Delta.AsAny().(type) {
-				case anthropic.TextDelta:
+			if e, ok := ev.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
+				if d, ok := e.Delta.AsAny().(anthropic.TextDelta); ok {
 					onDelta(d.Text)
 				}
 			}

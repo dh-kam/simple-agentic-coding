@@ -11,7 +11,6 @@ import (
 
 	"github.com/dh-kam/simple-agentic-coding/agent"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -79,7 +78,7 @@ type toolBlock struct {
 }
 
 type model struct {
-	client    agent.LLMClient
+	client    agent.Backend
 	agent     *agent.Agent
 	modelName string
 	base      string
@@ -105,7 +104,7 @@ type model struct {
 	approvalSeq    uint64
 }
 
-func newModel(client agent.LLMClient, modelName, base string) *model {
+func newModel(client agent.Backend, modelName, base string) *model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
@@ -518,8 +517,8 @@ func (m *model) saveSession() (string, error) {
 	}
 	path := m.sessionPath()
 	doc := struct {
-		Model    string                   `json:"model"`
-		Messages []anthropic.MessageParam `json:"messages"`
+		Model    string              `json:"model"`
+		Messages []agent.ChatMessage `json:"messages"`
 	}{Model: m.modelName, Messages: m.agent.History()}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -545,7 +544,7 @@ func (m *model) loadSession() (string, int, error) {
 		return "", 0, err
 	}
 	var doc struct {
-		Messages []anthropic.MessageParam `json:"messages"`
+		Messages []agent.ChatMessage `json:"messages"`
 	}
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return "", 0, err

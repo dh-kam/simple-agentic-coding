@@ -11,15 +11,14 @@ import (
 
 	"github.com/dh-kam/simple-agentic-coding/agent"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/charmbracelet/bubbletea"
 )
 
 // stubClient is a no-op LLMClient for TUI tests that don't run the agent.
 type stubClient struct{}
 
-func (stubClient) StreamMessage(context.Context, anthropic.MessageNewParams, func(string)) (*anthropic.Message, error) {
-	return &anthropic.Message{}, nil
+func (stubClient) Chat(context.Context, agent.ChatRequest, func(string)) (*agent.ChatResponse, error) {
+	return &agent.ChatResponse{}, nil
 }
 
 // TestModel_streamsAndTools drives the model's Update with the same messages
@@ -211,7 +210,7 @@ func TestSaveResumeSession(t *testing.T) {
 
 	m := newModel(nil, "m", ".")
 	m.agent = agent.New(stubClient{}, "m", "s")
-	m.agent.Resume([]anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hello"))})
+	m.agent.Resume([]agent.ChatMessage{{Role: "user", Content: "hello"}})
 
 	if _, err := m.saveSession(); err != nil {
 		t.Fatalf("save: %v", err)
