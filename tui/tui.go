@@ -31,7 +31,7 @@ func shouldAsk(name string) bool {
 // user quits (Ctrl+C or /exit). The agent's full tool set (CCTools + task
 // subagent) plus any extraTools (e.g. MCP tools) is wired here; events stream
 // back into the program via hooks.
-func Run(client *agent.AnthropicClient, modelName, base string, extraTools []agent.Tool, systemSuffix string) error {
+func Run(client agent.LLMClient, modelName, base string, extraTools []agent.Tool, systemSuffix string) error {
 	cfg := config.LoadEnv()
 	system := systemPrompt
 	if cfg.SystemPrompt != "" {

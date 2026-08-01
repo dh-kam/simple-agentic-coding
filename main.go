@@ -58,13 +58,30 @@ const (
 	cReset  = "\033[0m"
 )
 
-// makeClient creates an AnthropicClient, optionally with HAR capture transport.
-func makeClient(apiKey, baseURL string, har *capture.Transport) *agent.AnthropicClient {
-	if har != nil {
-		httpClient := &http.Client{Transport: har}
-		return agent.NewAnthropicClient(apiKey, baseURL, option.WithHTTPClient(httpClient))
+// makeClient creates an LLMClient based on AGENT_API (default: anthropic).
+// Supports: "anthropic" (Anthropic SDK) and "openai" (OpenAI-compatible API).
+func makeClient(apiKey, baseURL string, har *capture.Transport) agent.LLMClient {
+	apiType := os.Getenv("AGENT_API")
+	if apiType == "" {
+		apiType = "anthropic"
 	}
-	return agent.NewAnthropicClient(apiKey, baseURL)
+
+	// For Anthropic: use NewAnthropicClient (with optional HAR)
+	if apiType == "anthropic" {
+		if har != nil {
+			httpClient := &http.Client{Transport: har}
+			return agent.NewAnthropicClient(apiKey, baseURL, option.WithHTTPClient(httpClient))
+		}
+		return agent.NewAnthropicClient(apiKey, baseURL)
+	}
+
+	// For OpenAI: use NewOpenAIClient
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	c := agent.NewOpenAIClient(apiKey, baseURL)
+	fmt.Fprintf(os.Stderr, cDim+"🔌 OpenAI backend: %s"+cReset+"\n", baseURL)
+	return c
 }
 
 func main() {

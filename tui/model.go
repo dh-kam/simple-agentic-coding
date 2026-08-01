@@ -79,7 +79,7 @@ type toolBlock struct {
 }
 
 type model struct {
-	client    *agent.AnthropicClient
+	client    agent.LLMClient
 	agent     *agent.Agent
 	modelName string
 	base      string
@@ -105,7 +105,7 @@ type model struct {
 	approvalSeq    uint64
 }
 
-func newModel(client *agent.AnthropicClient, modelName, base string) *model {
+func newModel(client agent.LLMClient, modelName, base string) *model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
