@@ -129,15 +129,12 @@ func safePath(base, p string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes base", p)
 	}
-	// Symlink check: if the file exists and is a symlink, resolve and re-check
-	if li, err := os.Lstat(abs); err == nil && li.Mode()&os.ModeSymlink != 0 {
-		resolved, err := filepath.EvalSymlinks(abs)
-		if err != nil {
-			return "", fmt.Errorf("path %q symlink resolution failed: %w", p, err)
-		}
+	// Always resolve symlinks on the full path — catches intermediate
+	// directory symlinks (not just the final component).
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		rrel, err := filepath.Rel(cleanBase, resolved)
 		if err != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(filepath.Separator)) {
-			return "", fmt.Errorf("path %q symlink escapes base", p)
+			return "", fmt.Errorf("path %q resolves outside base", p)
 		}
 		return resolved, nil
 	}

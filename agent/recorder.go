@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 )
 
 // Recorder wraps a Backend and persists every request/response to a directory
 // for offline replay tests.
 type Recorder struct {
+	mu    sync.Mutex
 	inner Backend
 	dir   string
 	n     int
@@ -25,8 +27,10 @@ func NewRecorder(inner Backend, dir string) (*Recorder, error) {
 }
 
 func (r *Recorder) Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error) {
+	r.mu.Lock()
 	idx := r.n
 	r.n++
+	r.mu.Unlock()
 	if b, err := json.MarshalIndent(req, "", "  "); err == nil {
 		os.WriteFile(filepath.Join(r.dir, fmt.Sprintf("%03d_request.json", idx)), b, 0644)
 	}
