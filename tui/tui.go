@@ -75,6 +75,8 @@ func Run(client agent.Backend, modelName, base string, extraTools []agent.Tool, 
 			}
 			m.send(approvalMsg{req: req})
 			c := <-req.resp // block until the user decides
+			// Note: this blocks until user responds. ctx.Done() handling
+			// is via drainApprovals() which sends deny on interrupt.
 			return c.allow, c.reason
 		}),
 	)

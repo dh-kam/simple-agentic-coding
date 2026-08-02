@@ -100,12 +100,43 @@ func transportFor(cfg ServerConfig) (mcpsdk.Transport, error) {
 		return &mcpsdk.StreamableClientTransport{Endpoint: cfg.URL}, nil // default: streamable HTTP (2025-03-26)
 	case cfg.Command != "":
 		cmd := exec.Command(cfg.Command, cfg.Args...)
-		if len(cfg.Env) > 0 {
-			cmd.Env = append(os.Environ(), cfg.Env...)
-		}
+		// Scrub credential-bearing vars from inherited environment to prevent
+		// MCP servers (often third-party npx/uvx packages) from seeing API keys.
+		cmd.Env = scrubCreds(os.Environ(), cfg.Env)
 		return &mcpsdk.CommandTransport{Command: cmd}, nil
 	}
 	return nil, fmt.Errorf("server %q needs command or url", cfg.Name)
+}
+
+// scrubCreds filters credential-bearing env vars from the inherited environment
+// before passing to MCP child processes. Only vars explicitly listed in cfg.Env
+// (from the MCP config) are forwarded in addition to non-credential vars.
+
+var credPrefixes = []string{
+	"ANTHROPIC", "OPENAI", "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
+	"AWS_SECRET", "GITHUB_TOKEN", "DATABASE_URL", "PRIVATE_KEY",
+}
+
+func scrubCreds(inherit, extra []string) []string {
+	result := []string{}
+	for _, kv := range inherit {
+		key := strings.SplitN(kv, "=", 2)[0]
+		if isCredKey(key) {
+			continue
+		}
+		result = append(result, kv)
+	}
+	return append(result, extra...)
+}
+
+func isCredKey(key string) bool {
+	upper := strings.ToUpper(key)
+	for _, p := range credPrefixes {
+		if strings.Contains(upper, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Connect connects to the server (stdio command or HTTP/SSE endpoint),

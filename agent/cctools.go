@@ -306,6 +306,10 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			if in.URL == "" {
 				return "", errors.New("empty url")
 			}
+			// SSRF protection: block private IPs and non-http(s) schemes.
+			if err := validateURL(in.URL); err != nil {
+				return "", err
+			}
 			cctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			req, err := http.NewRequestWithContext(cctx, http.MethodGet, in.URL, nil)

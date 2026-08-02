@@ -96,7 +96,22 @@ func main() {
 		return
 	}
 
+	// Load .env but protect security-sensitive vars from being overridden
+	// by a project-local .env (prevents BASE_URL redirect attacks).
+	savedBaseURL := os.Getenv("ANTHROPIC_BASE_URL")
+	savedAPIKey := os.Getenv("ANTHROPIC_API_KEY")
+	savedAPI := os.Getenv("AGENT_API")
 	_ = godotenv.Load()
+	// Restore security vars from real env if .env tried to override them.
+	if savedBaseURL != "" {
+		os.Setenv("ANTHROPIC_BASE_URL", savedBaseURL)
+	}
+	if savedAPIKey != "" {
+		os.Setenv("ANTHROPIC_API_KEY", savedAPIKey)
+	}
+	if savedAPI != "" {
+		os.Setenv("AGENT_API", savedAPI)
+	}
 
 	// HAR capture: default ON, saved to ~/.agentic/hars/session-<timestamp>.har
 	// Override path with AGENT_HAR_FILE; disable with AGENT_HAR_DISABLE=1.
