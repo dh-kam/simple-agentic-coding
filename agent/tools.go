@@ -36,6 +36,13 @@ func NewReadFileTool(base string) Tool {
 			if err != nil {
 				return "", err
 			}
+			info, err := os.Stat(full)
+			if err != nil {
+				return "", err
+			}
+			if info.Size() > 10*1024*1024 {
+				return "", fmt.Errorf("file too large: %d bytes (max 10MB)", info.Size())
+			}
 			b, err := os.ReadFile(full)
 			if err != nil {
 				return "", err
@@ -98,6 +105,8 @@ func NewRunCommandTool(base string, timeout time.Duration, reg *ShellRegistry) T
 
 // safePath confines p under base, rejecting empty paths, absolute paths,
 // and traversal that escapes base.
+// safePath confines p under base, rejecting empty paths, absolute paths,
+// traversal, and symlinks that escape base.
 func safePath(base, p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("empty path")
@@ -119,6 +128,18 @@ func safePath(base, p string) (string, error) {
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes base", p)
+	}
+	// Symlink check: if the file exists and is a symlink, resolve and re-check
+	if li, err := os.Lstat(abs); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return "", fmt.Errorf("path %q symlink resolution failed: %w", p, err)
+		}
+		rrel, err := filepath.Rel(cleanBase, resolved)
+		if err != nil || rrel == ".." || strings.HasPrefix(rrel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("path %q symlink escapes base", p)
+		}
+		return resolved, nil
 	}
 	return abs, nil
 }

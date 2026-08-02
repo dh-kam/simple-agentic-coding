@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // This file implements background shells: run_command can start a command in
@@ -160,4 +161,20 @@ func NewKillShellTool(reg *ShellRegistry) Tool {
 			return "killed " + in.ShellID, nil
 		},
 	}
+}
+
+// CleanupStale removes shells that have been idle for longer than maxAge.
+func (r *ShellRegistry) CleanupStale(maxAge time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for id, sh := range r.shells {
+		select {
+		case <-sh.done:
+			delete(r.shells, id)
+			count++
+		default:
+		}
+	}
+	return count
 }

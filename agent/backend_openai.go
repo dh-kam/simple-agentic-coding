@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -59,7 +61,7 @@ func chatReqToOpenAI(req ChatRequest) map[string]any {
 
 	result := map[string]any{
 		"model":      req.Model,
-		"max_tokens": min64(req.MaxTokens, 8192), // GLM OpenAI endpoint caps lower than Anthropic
+		"max_tokens": openAIMaxTokens(req.MaxTokens), // GLM OpenAI endpoint caps lower than Anthropic
 		"messages":   msgs,
 		"stream":     true,
 	}
@@ -182,7 +184,8 @@ func parseOpenAIStream(body io.Reader, onDelta func(string)) (*ChatResponse, err
 		Content:    text.String(),
 		StopReason: "end_turn",
 	}
-	if finishReason == "tool_calls" {
+	switch finishReason {
+	case "tool_calls":
 		resp.StopReason = "tool_use"
 	}
 	for _, tc := range toolCalls {
@@ -221,3 +224,15 @@ type toolCallAccum struct {
 	name string
 	args string
 }
+
+func openAIMaxTokens(requested int64) int64 {
+	cap := int64(8192)
+	if v := osGetenv("AGENT_OPENAI_MAX_TOKENS"); v != "" {
+		if n, err := atoi64(v); err == nil && n > 0 {
+			cap = n
+		}
+	}
+	return min64(requested, cap)
+}
+func osGetenv(k string) string       { return os.Getenv(k) }
+func atoi64(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

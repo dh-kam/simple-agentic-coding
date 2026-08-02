@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -104,7 +105,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		entry.Request.PostData = &HARPostData{
 			MimeType: req.Header.Get("Content-Type"),
-			Text:     string(body),
+			Text:     redactBody(string(body)),
 		}
 	}
 
@@ -181,6 +182,26 @@ func (t *Transport) Save(path string) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+// redactBody scans text for common API key patterns and masks them.
+func redactBody(text string) string {
+	patterns := []string{
+		`sk-[a-zA-Z0-9-_]{8,}`,
+		`sk-ant-[a-zA-Z0-9-_]{8,}`,
+		`gh[pousr]_[a-zA-Z0-9]{8,}`,
+		`Bearer [a-zA-Z0-9._-]{8,}`,
+	}
+	for _, p := range patterns {
+		re := regexp.MustCompile(p)
+		text = re.ReplaceAllStringFunc(text, func(m string) string {
+			if len(m) > 8 {
+				return m[:4] + "***" + m[len(m)-2:]
+			}
+			return "***"
+		})
+	}
+	return text
 }
 
 // redactKey masks API keys in header values.
