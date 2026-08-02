@@ -166,7 +166,7 @@ func TestUnregisterTool(t *testing.T) {
 	ag := New(&fakeClient{}, "m", "s")
 	ag.RegisterTool(Tool{Name: "x", InputSchema: map[string]any{}, Run: func(context.Context, json.RawMessage) (string, error) { return "", nil }})
 	ag.UnregisterTool("x")
-	defs := ag.toolDefs()
+	defs := ag.ToolDefs()
 	for _, d := range defs {
 		if d.Name == "x" {
 			t.Error("x still registered")
