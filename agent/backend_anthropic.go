@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"fmt"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
@@ -18,7 +20,10 @@ func NewAnthropicBackend(apiKey, baseURL string, extra ...option.RequestOption) 
 }
 
 func (b *AnthropicBackend) Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error) {
-	params := chatReqToAnthropic(req)
+	params, err := chatReqToAnthropic(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: build params: %w", err)
+	}
 	msg, err := b.client.StreamMessage(ctx, params, onDelta)
 	if err != nil {
 		return nil, err
@@ -26,14 +31,18 @@ func (b *AnthropicBackend) Chat(ctx context.Context, req ChatRequest, onDelta fu
 	return anthropicMsgToResponse(msg), nil
 }
 
-func chatReqToAnthropic(req ChatRequest) anthropic.MessageNewParams {
+func chatReqToAnthropic(req ChatRequest) (anthropic.MessageNewParams, error) {
 	params := anthropic.MessageNewParams{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
 		System:    []anthropic.TextBlockParam{{Text: req.System}},
 	}
 	for _, m := range req.Messages {
-		params.Messages = append(params.Messages, chatMsgToAnthropic(m))
+		mp, err := chatMsgToAnthropic(m)
+		if err != nil {
+			return params, err
+		}
+		params.Messages = append(params.Messages, mp)
 	}
 	for _, t := range req.Tools {
 		params.Tools = append(params.Tools, anthropic.ToolUnionParam{
@@ -44,10 +53,10 @@ func chatReqToAnthropic(req ChatRequest) anthropic.MessageNewParams {
 			},
 		})
 	}
-	return params
+	return params, nil
 }
 
-func chatMsgToAnthropic(m ChatMessage) anthropic.MessageParam {
+func chatMsgToAnthropic(m ChatMessage) (anthropic.MessageParam, error) {
 	var raw map[string]any
 	switch {
 	case m.ToolCallID != "":
@@ -81,10 +90,15 @@ func chatMsgToAnthropic(m ChatMessage) anthropic.MessageParam {
 		}
 		raw = map[string]any{"role": role, "content": m.Content}
 	}
-	data, _ := json.Marshal(raw)
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return anthropic.MessageParam{}, fmt.Errorf("marshal: %w", err)
+	}
 	var mp anthropic.MessageParam
-	json.Unmarshal(data, &mp)
-	return mp
+	if e := json.Unmarshal(data, &mp); e != nil {
+		return anthropic.MessageParam{}, fmt.Errorf("unmarshal: %w", e)
+	}
+	return mp, nil
 }
 
 func anthropicMsgToResponse(msg *anthropic.Message) *ChatResponse {

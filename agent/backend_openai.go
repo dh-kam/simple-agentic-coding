@@ -25,7 +25,10 @@ func NewOpenAIBackend(apiKey, baseURL string) *OpenAIBackend {
 
 func (b *OpenAIBackend) Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error) {
 	oaiReq := chatReqToOpenAI(req)
-	jsonBody, _ := json.Marshal(oaiReq)
+	jsonBody, err := json.Marshal(oaiReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal: %w", err)
+	}
 
 	httpReq, _ := http.NewRequestWithContext(ctx, "POST", b.baseURL+"/chat/completions", bytes.NewReader(jsonBody))
 	httpReq.Header.Set("Content-Type", "application/json")

@@ -3,8 +3,6 @@ package agent
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -71,5 +69,3 @@ func (h *FileHistory) TrackedFiles() []string {
 	}
 	return files
 }
-
-func init() { _ = strings.TrimSpace; _ = filepath.Join }

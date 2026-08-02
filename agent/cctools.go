@@ -312,7 +312,8 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			if err != nil {
 				return "", err
 			}
-			resp, err := http.DefaultClient.Do(req)
+			httpClient := &http.Client{Timeout: 15 * time.Second}
+			resp, err := httpClient.Do(req)
 			if err != nil {
 				return "", err
 			}
@@ -569,7 +570,11 @@ func NewNotebookEditTool(base string) Tool {
 					if !ok {
 						continue
 					}
-					if id, _ := cm["id"].(string); id == in.CellID {
+					id, idOk := cm["id"].(string)
+					if !idOk || id == "" {
+						continue
+					}
+					if id == in.CellID {
 						cm["source"] = splitSource(in.NewSource)
 						if in.CellType != "" {
 							cm["cell_type"] = in.CellType
@@ -591,7 +596,11 @@ func NewNotebookEditTool(base string) Tool {
 				idx := len(cellsAny)
 				for i, c := range cellsAny {
 					if cm, ok := c.(map[string]any); ok {
-						if id, _ := cm["id"].(string); id == in.CellID {
+						id, idOk := cm["id"].(string)
+						if !idOk || id == "" {
+							continue
+						}
+						if id == in.CellID {
 							idx = i + 1
 							break
 						}

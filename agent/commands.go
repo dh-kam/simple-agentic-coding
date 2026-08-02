@@ -114,5 +114,3 @@ func MatchCustomCommand(cmds []CustomCommand, input string) (string, string, boo
 	}
 	return "", "", false
 }
-
-func init() { _ = fmt.Sprintf }

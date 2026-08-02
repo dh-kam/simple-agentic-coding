@@ -30,6 +30,10 @@ func NewGitTool() Tool {
 				cmd = "git " + cmd
 			}
 			c := exec.CommandContext(ctx, "sh", "-c", cmd)
+			// Check we are in a git repo
+			if e := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree").Run(); e != nil {
+				return "", fmt.Errorf("not a git repository")
+			}
 			out, err := c.CombinedOutput()
 			if err != nil {
 				return string(out) + "\n" + err.Error(), err

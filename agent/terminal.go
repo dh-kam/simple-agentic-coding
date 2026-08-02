@@ -58,5 +58,3 @@ compdef _agentic agentic
 
 	return sb.String()
 }
-
-func init() { _ = strings.TrimSpace }
