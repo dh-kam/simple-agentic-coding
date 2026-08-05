@@ -183,25 +183,36 @@ func confineToBase(parts []string, atRepoRoot bool) []string {
 	return append(append([]string{}, parts...), "--", ".")
 }
 
-// repoRoot reports whether base is the top level of its git worktree. Cached
-// because it costs a subprocess and cannot change during a session.
+// repoRoot reports whether base is the top level of its git worktree. The
+// answer is cached because it costs a subprocess and cannot change during a
+// session — but only once it has actually been determined.
 type repoRoot struct {
-	once sync.Once
-	is   bool
+	mu       sync.Mutex
+	resolved bool
+	is       bool
 }
 
 func (r *repoRoot) atRoot(ctx context.Context, base string) bool {
-	r.once.Do(func() {
-		cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-		cmd.Dir = base
-		out, err := cmd.Output()
-		if err != nil {
-			return // not a repo: leave confinement on, it cannot hurt
-		}
-		top, err1 := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
-		here, err2 := filepath.EvalSymlinks(base)
-		r.is = err1 == nil && err2 == nil && top == here
-	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.resolved {
+		return r.is
+	}
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	cmd.Dir = base
+	out, err := cmd.Output()
+	if err != nil {
+		// Not a repository, or this particular call was cancelled. Answer
+		// "not at the root" so confinement stays on, but do NOT cache it:
+		// caching one cancelled call would keep appending a pathspec at the
+		// real root for the rest of the session, and that silently drops merge
+		// and empty commits from every log the model reads.
+		return false
+	}
+	top, err1 := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	here, err2 := filepath.EvalSymlinks(base)
+	r.is = err1 == nil && err2 == nil && top == here
+	r.resolved = true
 	return r.is
 }
 

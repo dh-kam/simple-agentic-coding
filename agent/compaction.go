@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -43,9 +42,12 @@ func (a *Agent) maybeCompact(ctx context.Context) error {
 	}
 
 	summary := a.runningSummary
+	// Rendered into messages[0] but never folded into runningSummary: appending
+	// it each time made the "bounded" hopeless path grow messages[0] by a line
+	// per compaction, which is the unbounded growth this path exists to avoid.
+	note := ""
 	if hopeless {
-		summary = strings.TrimSpace(summary + "\n(맥락 한도를 초과해 이전 " +
-			fmt.Sprintf("%d", cutIdx-1) + "개 메시지를 요약 없이 생략했습니다.)")
+		note = "\n(맥락 한도를 초과해 오래된 메시지를 요약 없이 생략했습니다.)"
 	} else {
 		// Feed the previous summary back in, or each compaction would discard
 		// everything the one before it had condensed.
@@ -67,7 +69,7 @@ func (a *Agent) maybeCompact(ctx context.Context) error {
 	a.runningSummary = summary
 
 	kept := make([]ChatMessage, 0, 1+(len(a.messages)-cutIdx))
-	kept = append(kept, ChatMessage{Role: "user", Content: a.initialUser + summaryHeader + summary})
+	kept = append(kept, ChatMessage{Role: "user", Content: a.initialUser + summaryHeader + summary + note})
 	kept = append(kept, a.messages[cutIdx:]...)
 	a.messages = kept
 	return nil

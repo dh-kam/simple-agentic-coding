@@ -1496,3 +1496,37 @@ func TestSplitGitFlag(t *testing.T) {
 		}
 	}
 }
+
+// A cancelled or failing probe must not be cached: answering "not at the root"
+// forever would keep appending a pathspec at the real root, and that silently
+// drops merge and empty commits from every log the model reads.
+func TestRepoRoot_doesNotCacheAFailedProbe(t *testing.T) {
+	base := t.TempDir()
+	if out, err := exec.Command("git", "-C", base, "init").CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v %s", err, out)
+	}
+
+	var clean repoRoot
+	truth := clean.atRoot(context.Background(), base)
+	if !truth {
+		t.Fatal("precondition: base is the repository root")
+	}
+
+	var r repoRoot
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if r.atRoot(dead, base) {
+		t.Error("a cancelled probe should answer conservatively")
+	}
+	if got := r.atRoot(context.Background(), base); got != truth {
+		t.Errorf("the cancelled probe was cached: got %v, want %v", got, truth)
+	}
+
+	// a genuine non-repo answer is still cached rather than re-probed
+	var notARepo repoRoot
+	nonRepo := t.TempDir()
+	notARepo.atRoot(context.Background(), nonRepo)
+	if notARepo.atRoot(context.Background(), nonRepo) {
+		t.Error("a directory outside any repository reported as a root")
+	}
+}

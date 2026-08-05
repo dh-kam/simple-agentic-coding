@@ -370,6 +370,16 @@ func TestCompaction_boundedWhenHopeless(t *testing.T) {
 	if len(ag.messages) > 8 {
 		t.Errorf("history grew to %d messages; compaction is not bounding it", len(ag.messages))
 	}
+	// Message count is not the whole story: an elision note appended to the
+	// running summary on every compaction grew messages[0] a line at a time,
+	// which is the unbounded growth this path exists to prevent.
+	if got := len(ag.messages[0].Content); got > len(ag.initialUser)+300 {
+		t.Errorf("messages[0] grew to %d bytes from a %d-byte task; the elision note is accumulating",
+			got, len(ag.initialUser))
+	}
+	if n := strings.Count(ag.messages[0].Content, "생략"); n > 1 {
+		t.Errorf("elision note repeated %d times in messages[0]", n)
+	}
 }
 
 // Multi-turn histories interleave extra user messages; those start rounds too.
