@@ -34,7 +34,6 @@ config/              AGENT_CONFIG(JSON) 로드 — 시스템 프롬프트·model
 testdata/glm_hello/  실제 GLM 요청/응답 — read_file 시나리오 (NNN_request/response.json)
 testdata/glm_write/  실제 GLM 요청/응답 — write + read_file 시나리오
 examples/mcp-echo/   검증용 최소 stdio MCP 서버(echo 도구) — go build -o /tmp/mcp-echo ./examples/mcp-echo
-hello.txt            read_file 테스트용 픽스처
 .env / .env.example  provider 설정
 ```
 
@@ -140,7 +139,7 @@ AGENT_MCP_CONFIG=./mcp.json go run .
 #   AGENT_MODEL=glm-5.2
 
 go run .                      # 인자 없음 → 인터랙티브 TUI REPL (Claude Code 스타일)
-go run . hello.txt를 읽고 요약  # 프롬프트 인자 → 한 번 실행 후 종료 (녹화에도 사용)
+go run . ask "main.go를 읽고 요약"  # 프롬프트 인자 → 한 번 실행 후 종료 (녹화에도 사용)
 ```
 
 **TUI REPL** (`go run .`): 환영 배너 + 입력 상자, 토큰 단위 스트리밍 답변(glamour 마크다운 렌더),

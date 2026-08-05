@@ -35,7 +35,6 @@ config/              loads AGENT_CONFIG (JSON) — system prompt, model, disable
 testdata/glm_hello/  real GLM request/response — read_file scenario (NNN_request/response.json)
 testdata/glm_write/  real GLM request/response — write + read_file scenario
 examples/mcp-echo/   minimal stdio MCP server (echo tool) for verification — go build -o /tmp/mcp-echo ./examples/mcp-echo
-hello.txt            read_file test fixture
 .env / .env.example  provider settings
 ```
 
@@ -119,7 +118,7 @@ If a `.env` exists it's auto-loaded at startup (godotenv). Already-set env vars 
 #   AGENT_MODEL=glm-5.2
 
 go run .                       # no args → interactive TUI REPL (Claude Code style)
-go run . summarize hello.txt   # prompt arg → run once and exit (also used for recording)
+go run . ask "summarize main.go"   # prompt arg → run once and exit (also used for recording)
 ```
 
 **TUI REPL** (`go run .`): welcome banner + input box, token-by-token streaming answer (glamour
