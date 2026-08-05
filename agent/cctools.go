@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -194,9 +195,17 @@ func NewGrepTool(base string) Tool {
 			if err != nil {
 				return "", err
 			}
+			if rb, err := filepath.EvalSymlinks(cleanBase); err == nil {
+				cleanBase = rb
+			}
 			root := cleanBase
 			if in.Path != "" && in.Path != "." {
-				root = filepath.Join(cleanBase, in.Path)
+				// Confine the search root to base. A model-supplied path like
+				// "../" must not read files outside base.
+				root, err = safePath(base, in.Path)
+				if err != nil {
+					return "", err
+				}
 			}
 			var out []string
 			matchCount := 0
@@ -306,8 +315,11 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			if in.URL == "" {
 				return "", errors.New("empty url")
 			}
-			// SSRF protection: block private IPs and non-http(s) schemes.
-			if err := validateURL(in.URL); err != nil {
+			// SSRF protection: resolve the host and require every resolved IP
+			// to be public. Returns validated IPs so we can pin the dial and
+			// defeat DNS rebinding between validation and connection.
+			ips, err := validateURL(ctx, in.URL)
+			if err != nil {
 				return "", err
 			}
 			cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -316,7 +328,29 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			if err != nil {
 				return "", err
 			}
-			httpClient := &http.Client{Timeout: 15 * time.Second}
+			// Pin the dial to a validated IP so the host cannot re-resolve to
+			// a different (private) address after validation.
+			transport := &http.Transport{
+				DialContext: func(dctx context.Context, _, addr string) (net.Conn, error) {
+					_, port, err := net.SplitHostPort(addr)
+					if err != nil {
+						return nil, err
+					}
+					var lastErr error
+					for _, ip := range ips {
+						c, derr := (&net.Dialer{}).DialContext(dctx, "tcp", net.JoinHostPort(ip.String(), port))
+						if derr == nil {
+							return c, nil
+						}
+						lastErr = derr
+					}
+					if lastErr != nil {
+						return nil, lastErr
+					}
+					return nil, fmt.Errorf("no validated IP to dial")
+				},
+			}
+			httpClient := &http.Client{Timeout: 15 * time.Second, Transport: transport}
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				return "", err

@@ -118,6 +118,12 @@ func safePath(base, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Normalize base symlinks so the Rel() comparison below stays consistent.
+	// Without this, a base that is itself a symlink rejects every path
+	// (EvalSymlinks(abs) resolves through the link while cleanBase does not).
+	if rb, err := filepath.EvalSymlinks(cleanBase); err == nil {
+		cleanBase = rb
+	}
 	abs, err := filepath.Abs(filepath.Join(cleanBase, p))
 	if err != nil {
 		return "", err

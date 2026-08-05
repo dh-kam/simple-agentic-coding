@@ -83,6 +83,3 @@ func (r *ReplayClient) Chat(_ context.Context, req ChatRequest, onDelta func(str
 	}
 	return &resp, nil
 }
-
-// CloseAll is a no-op for Backend (no persistent connections at this level).
-func CloseAll(_ []*struct{}) {}

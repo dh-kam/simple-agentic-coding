@@ -299,7 +299,7 @@ func printDiffCLI(path, oldContent, newContent string) {
 	if diff == "" {
 		return
 	}
-	fmt.Printf(cBold + "✎ " + path + cReset + "\n")
+	fmt.Printf(cBold+"✎ %s"+cReset+"\n", path)
 	for _, line := range strings.Split(diff, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):

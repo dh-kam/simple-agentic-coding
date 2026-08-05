@@ -1,44 +1,84 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// validateURL protects against SSRF by blocking private IPs and non-http(s) schemes.
-func validateURL(rawURL string) error {
+// validateURL protects against SSRF. It enforces an http(s) scheme, then
+// resolves the host and requires every resolved IP to be public.
+//
+// Resolving is the key step a ParseIP-only check misses: it normalizes the
+// non-standard IP encodings a model can craft (decimal 2130706433, hex
+// 0x7f000001, octal 0177.0.0.1 — all 127.0.0.1) and reveals hostnames that
+// point at private ranges. It returns the validated IPs so the caller can
+// pin the dial address, which defeats DNS rebinding between validation and
+// connection.
+func validateURL(ctx context.Context, rawURL string) ([]net.IP, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return fmt.Errorf("scheme %q not allowed (only http/https)", u.Scheme)
+		return nil, fmt.Errorf("scheme %q not allowed (only http/https)", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("empty host")
+		return nil, fmt.Errorf("empty host")
 	}
-	if isPrivateHost(host) {
-		return fmt.Errorf("private/loopback host %q blocked (SSRF protection)", host)
-	}
-	return nil
-}
 
-func isPrivateHost(host string) bool {
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	// Literal IP in a standard textual form: classify directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if reason := classifyIP(ip); reason != "" {
+			return nil, fmt.Errorf("%s host %q blocked (SSRF protection)", reason, host)
+		}
+		return []net.IP{ip}, nil
 	}
-	// Hostnames like "localhost" or "*.internal"
-	host = strings.ToLower(host)
-	blocked := []string{"localhost", "metadata.google.internal", "metadata"}
-	for _, b := range blocked {
-		if host == b {
-			return true
+
+	// Hostname or non-standard IP encoding: resolve and verify every address.
+	// The resolver normalizes decimal/hex/octal IPs and surfaces any private
+	// address a domain resolves to.
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(rctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("host %q resolved to no addresses", host)
+	}
+	for _, ipp := range ips {
+		if reason := classifyIP(ipp.IP); reason != "" {
+			return nil, fmt.Errorf("%s host %q (→ %s) blocked (SSRF protection)", reason, host, ipp.IP)
 		}
 	}
-	return false
+	out := make([]net.IP, 0, len(ips))
+	for _, ipp := range ips {
+		out = append(out, ipp.IP)
+	}
+	return out, nil
+}
+
+// classifyIP returns a short reason for blocking the IP, or "" if it is
+// acceptable. Cloud metadata endpoints (169.254.169.254) live in the
+// link-local range, which is blocked here.
+func classifyIP(ip net.IP) string {
+	if ip.IsLoopback() {
+		return "loopback"
+	}
+	if ip.IsPrivate() {
+		return "private"
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return "link-local"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified"
+	}
+	return ""
 }
