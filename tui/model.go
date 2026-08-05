@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/dh-kam/simple-agentic-coding/agent"
 
@@ -63,7 +64,10 @@ const (
 
 // slashCommands are the TUI commands — used for /help, Tab completion, and the
 // live suggestion line.
-var slashCommands = []string{"/help", "/clear", "/save", "/resume", "/exit"}
+var slashCommands = []string{
+	"/help", "/clear", "/save", "/resume", "/undo", "/cost", "/status",
+	"/model", "/compact", "/mcp", "/exit",
+}
 
 // entry is one rendered line group in the transcript.
 type entry struct {
@@ -84,7 +88,11 @@ type model struct {
 	base      string
 	program   *tea.Program
 	ctx       context.Context
-	cancel    context.CancelFunc
+	// rootCancel tears down the whole REPL; runCancel stops just the current
+	// run. submit() used to overwrite the single `cancel` field with the
+	// per-run one, so quitting could no longer cancel the root context.
+	rootCancel context.CancelFunc
+	runCancel  context.CancelFunc
 
 	width, height int
 	input         textarea.Model
@@ -92,16 +100,25 @@ type model struct {
 	viewport      viewport.Model
 	md            mdCache
 
+	settings    *agent.Settings
+	fileHistory *agent.FileHistory
+	customCmds  []agent.CustomCommand
+
 	entries        []*entry
 	active         map[string]*toolBlock
 	cur            strings.Builder
 	streamRendered string // glamour(cur), refreshed on spinner tick while streaming
 	working        bool
 	interrupted    bool // set when the user interrupted the current run
-	quitting       bool
 	askQueue       []approvalReq
 	asking         *approvalReq
 	approvalSeq    uint64
+
+	// quitting is read by send on the agent's goroutines while Update writes
+	// it on the bubbletea loop, so it has to be atomic.
+	quitting atomic.Bool
+
+	send func(tea.Msg)
 }
 
 func newModel(client agent.Backend, modelName, base string) *model {
@@ -118,14 +135,20 @@ func newModel(client agent.Backend, modelName, base string) *model {
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j"), key.WithHelp("ctrl+j", "newline"))
 
 	m := &model{
-		client:    client,
-		modelName: modelName,
-		base:      base,
-		spinner:   sp,
-		input:     ta,
-		viewport:  viewport.New(80, 20),
-		active:    map[string]*toolBlock{},
+		client:      client,
+		modelName:   modelName,
+		base:        base,
+		spinner:     sp,
+		input:       ta,
+		viewport:    viewport.New(80, 20),
+		active:      map[string]*toolBlock{},
+		settings:    &agent.Settings{},
+		fileHistory: agent.NewFileHistory(),
 	}
+	m.send = m.defaultSend
+	// Run replaces this with a cancellable context; the default keeps submit()
+	// from dereferencing a nil parent if the model is driven directly.
+	m.ctx, m.rootCancel = context.WithCancel(context.Background())
 	m.entries = append(m.entries, &entry{kind: kindText, text: renderBanner(modelName)})
 	return m
 }
@@ -196,11 +219,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		// If the user interrupted, the run's late result is expected — swallow it
-		// so we don't append a stale error or a partial answer.
+		// so we don't append a stale error or a partial answer. This is also
+		// where the interrupt actually completes: only now has the run
+		// goroutine released the Agent, so it is safe to accept input again.
 		if m.interrupted {
 			m.interrupted = false
 			m.cur.Reset()
+			m.streamRendered = ""
 			m.working = false
+			m.entries = append(m.entries, &entry{kind: kindText, text: errStyle.Render("⏹ 중단됨")})
 			m.refresh()
 			return m, m.input.Focus()
 		}
@@ -214,6 +241,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamRendered = ""
 		m.working = false
+		if m.agent != nil {
+			m.agent.Shells().Reap() // drop finished background shells
+		}
 		if msg.err != nil {
 			m.entries = append(m.entries, &entry{kind: kindText, text: errStyle.Render("✗ " + msg.err.Error())})
 		}
@@ -221,6 +251,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.input.Focus()
 
 	case approvalMsg:
+		// A cancelled run's remaining parallel tools still reach the approver.
+		// Auto-deny them rather than popping a modal for work the user just
+		// stopped — the modal would also cover the "중단 중" indicator.
+		if m.interrupted || m.quitting.Load() {
+			msg.req.resp <- choice{allow: false, reason: "취소됨"}
+			return m, nil
+		}
 		// a tool wants permission; queue and present the first pending one
 		m.askQueue = append(m.askQueue, msg.req)
 		m.presentNext()
@@ -247,8 +284,15 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
 		return m.interruptOrQuit()
+	case tea.KeyEsc:
+		// Esc interrupts but never quits: the help text promises Ctrl+C for
+		// exiting, and losing a session to a stray Esc is not recoverable.
+		if m.working {
+			return m.interruptOrQuit()
+		}
+		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown, tea.KeyUp, tea.KeyDown:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -288,36 +332,80 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// approve is the agent's Approver. It runs on the agent's goroutines, not the
+// bubbletea loop: persistent rules are applied first, and only an undecided
+// call blocks on the modal.
+func (m *model) approve(name string, args json.RawMessage) (bool, string) {
+	switch m.settings.Decide(name) {
+	case agent.DecideAllow:
+		return true, ""
+	case agent.DecideDeny:
+		return false, ".agentic/settings.json 규칙에 의해 차단됨"
+	}
+	req := approvalReq{
+		id:   fmt.Sprintf("ap-%d", atomic.AddUint64(&m.approvalSeq, 1)),
+		name: name,
+		args: args,
+		resp: make(chan choice, 1),
+	}
+	m.send(approvalMsg{req: req})
+	// Blocks until the user decides. Interrupt and quit release it:
+	// drainApprovals answers everything queued, and Update auto-denies any
+	// request that arrives afterwards.
+	c := <-req.resp
+	return c.allow, c.reason
+}
+
+// cancelAll stops the current run and the REPL's root context.
+func (m *model) cancelAll() {
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	if m.rootCancel != nil {
+		m.rootCancel()
+	}
+}
+
 // interruptOrQuit: if the agent is working, cancel the current run and return
 // to the prompt (without quitting). If idle, quit. Matches Claude Code's
 // "Ctrl+C interrupts; a second one / idle one exits" feel.
 func (m *model) interruptOrQuit() (tea.Model, tea.Cmd) {
 	m.drainApprovals() // release any tool blocked on permission
 	if m.working {
-		m.interrupted = true
-		if m.cancel != nil {
-			m.cancel()
+		// A second Ctrl+C while the run is still winding down quits outright.
+		if m.interrupted {
+			m.quitting.Store(true)
+			m.cancelAll()
+			return m, tea.Quit
 		}
-		m.working = false
-		m.cur.Reset()
-		m.entries = append(m.entries, &entry{kind: kindText, text: errStyle.Render("⏹ 중단됨")})
+		m.interrupted = true
+		if m.runCancel != nil {
+			m.runCancel()
+		}
+		// working stays true until doneMsg arrives. Cancellation is
+		// asynchronous: the run goroutine still owns the Agent, so clearing
+		// the flag here re-opened the key handler and let the next Enter start
+		// a second Run on the same Agent — which is documented as unsafe for
+		// concurrent use — while /save and /status read History() underneath it.
+		m.entries = append(m.entries, &entry{kind: kindText, text: errStyle.Render("⏹ 중단 중… (Ctrl+C 한 번 더 누르면 종료)")})
 		m.refresh()
-		return m, m.input.Focus()
+		return m, nil
 	}
-	m.quitting = true
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.quitting.Store(true)
+	m.cancelAll()
 	return m, tea.Quit
 }
 
 func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
-	switch text {
+	// User-defined commands from .agentic/commands/*.json expand into a prompt.
+	if _, prompt, ok := agent.MatchCustomCommand(m.customCmds, text); ok {
+		m.entries = append(m.entries, &entry{kind: kindText, text: renderUser(text)})
+		return m, m.submit(prompt)
+	}
+	switch strings.Fields(text)[0] {
 	case "/exit", "/quit":
-		m.quitting = true
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.quitting.Store(true)
+		m.cancelAll()
 		return m, tea.Quit
 	case "/clear":
 		m.entries = []*entry{{kind: kindText, text: renderBanner(m.modelName)}}
@@ -325,13 +413,16 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.refresh()
 		return m, nil
 	case "/help":
-		help := strings.Join([]string{
+		lines := []string{
 			titleStyle.Render("agentic — 도움말"),
-			hintStyle.Render("명령: /help /clear /save /resume /exit"),
+			hintStyle.Render("명령: " + strings.Join(slashCommands, " ")),
 			hintStyle.Render("입력: Enter 전송 · Ctrl+J 줄바꿈 · Tab 명령 자동완성 · Ctrl+C 중단/종료"),
 			hintStyle.Render("표시: 도구 호출 ✓/✗ · 파일 변경 diff · 권한 요청 시 y/n"),
-		}, "\n")
-		m.entries = append(m.entries, &entry{kind: kindText, text: help})
+		}
+		if s := agent.FormatCustomCommandList(m.customCmds); s != "" {
+			lines = append(lines, hintStyle.Render(strings.TrimRight(s, "\n")))
+		}
+		m.entries = append(m.entries, &entry{kind: kindText, text: strings.Join(lines, "\n")})
 		m.refresh()
 		return m, nil
 	case "/save":
@@ -351,15 +442,23 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.refresh()
 		return m, nil
 	case "/cost":
-		m.entries = append(m.entries, &entry{kind: kindText, text: hintStyle.Render("💰 토큰 사용량 추적은 아직 개발 중입니다")})
+		m.entries = append(m.entries, &entry{kind: kindText, text: m.renderCost()})
+		m.refresh()
+		return m, nil
+	case "/undo":
+		m.entries = append(m.entries, &entry{kind: kindText, text: m.undoLast()})
 		m.refresh()
 		return m, nil
 	case "/status":
 		var sb strings.Builder
 		sb.WriteString(hintStyle.Render("📊 상태") + "\n")
 		sb.WriteString("  model: " + m.modelName + "\n")
-		sb.WriteString("  tools: " + fmt.Sprintf("%d", len(m.agent.ToolDefs())) + "\n")
-		sb.WriteString("  messages: " + fmt.Sprintf("%d", len(m.agent.History())))
+		if m.agent != nil {
+			sb.WriteString(fmt.Sprintf("  tools: %d\n", len(m.agent.ToolDefs())))
+			sb.WriteString(fmt.Sprintf("  messages: %d\n", len(m.agent.History())))
+		}
+		sb.WriteString(fmt.Sprintf("  undo 가능: %d 파일\n", len(m.fileHistory.TrackedFiles())))
+		sb.WriteString(m.settings.Describe())
 		m.entries = append(m.entries, &entry{kind: kindText, text: sb.String()})
 		m.refresh()
 		return m, nil
@@ -386,8 +485,14 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 func (m *model) submit(text string) tea.Cmd {
 	m.working = true
 	m.input.Blur()
+	// Release the previous turn's context. Each WithCancel registers a child on
+	// m.ctx that lives until it is cancelled, so overwriting without cancelling
+	// accumulated one per turn for the life of the REPL.
+	if m.runCancel != nil {
+		m.runCancel()
+	}
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel = cancel
+	m.runCancel = cancel
 	go func() {
 		ans, err := m.agent.Run(ctx, text)
 		m.send(doneMsg{answer: ans, err: err})
@@ -395,8 +500,11 @@ func (m *model) submit(text string) tea.Cmd {
 	return m.spinner.Tick
 }
 
-func (m *model) send(msg tea.Msg) {
-	if m.quitting || m.program == nil {
+// send delivers a message from an agent goroutine into the bubbletea loop.
+// It is a field rather than a method so tests can drive the hooks without a
+// terminal; production code never replaces it.
+func (m *model) defaultSend(msg tea.Msg) {
+	if m.quitting.Load() || m.program == nil {
 		return
 	}
 	m.program.Send(msg)
@@ -470,6 +578,8 @@ func (m *model) View() string {
 	switch {
 	case m.asking != nil:
 		bottom = renderApproval(m.asking.name, m.asking.args)
+	case m.working && m.interrupted:
+		bottom = dimStyle.Render(m.spinner.View()+" 중단 중…  ") + hintStyle.Render("Ctrl+C 한 번 더 누르면 종료")
 	case m.working:
 		bottom = dimStyle.Render(m.spinner.View()+" 작업 중…  ") + hintStyle.Render("Ctrl+C 취소")
 	default:
@@ -527,6 +637,47 @@ func (m *model) drainApprovals() {
 	m.askQueue = nil
 }
 
+// renderCost reports the tokens this session consumed. The numbers come from
+// the backends' usage fields, which neither of them used to populate.
+func (m *model) renderCost() string {
+	if m.agent == nil {
+		return hintStyle.Render("💰 아직 요청이 없습니다")
+	}
+	u := m.agent.TotalUsage()
+	if u.InputTokens+u.OutputTokens == 0 {
+		return hintStyle.Render("💰 사용량 정보 없음 — 백엔드가 usage를 보고하지 않았습니다")
+	}
+	return hintStyle.Render("💰 토큰 사용량") + "\n" +
+		fmt.Sprintf("  input:  %d\n  output: %d\n  total:  %d",
+			u.InputTokens, u.OutputTokens, u.InputTokens+u.OutputTokens)
+}
+
+// undoLast rolls back the most recent edit to every file the agent touched
+// this session, restoring the content captured by the change hook.
+func (m *model) undoLast() string {
+	files := m.fileHistory.TrackedFiles()
+	if len(files) == 0 {
+		return hintStyle.Render("↩ 되돌릴 변경이 없습니다")
+	}
+	var ok, failed []string
+	for _, f := range files {
+		rel, err := filepath.Rel(m.base, f)
+		if err != nil {
+			rel = f
+		}
+		if err := m.fileHistory.Undo(f); err != nil {
+			failed = append(failed, rel+" ("+err.Error()+")")
+		} else {
+			ok = append(ok, rel)
+		}
+	}
+	out := okStyle.Render("↩ 되돌림: ") + dimStyle.Render(strings.Join(ok, ", "))
+	if len(failed) > 0 {
+		out += "\n" + errStyle.Render("✗ 실패: "+strings.Join(failed, ", "))
+	}
+	return out
+}
+
 // sessionPath is AGENT_SESSION or the default .agentic/session.json.
 func (m *model) sessionPath() string {
 	if p := os.Getenv("AGENT_SESSION"); p != "" {
@@ -542,9 +693,9 @@ func (m *model) saveSession() (string, error) {
 	}
 	path := m.sessionPath()
 	doc := struct {
-		Model    string              `json:"model"`
-		Messages []agent.ChatMessage `json:"messages"`
-	}{Model: m.modelName, Messages: m.agent.History()}
+		Model string `json:"model"`
+		agent.Session
+	}{Model: m.modelName, Session: m.agent.Snapshot()}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return "", err
@@ -568,13 +719,11 @@ func (m *model) loadSession() (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	var doc struct {
-		Messages []agent.ChatMessage `json:"messages"`
-	}
+	var doc agent.Session
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return "", 0, err
 	}
-	m.agent.Resume(doc.Messages)
+	m.agent.Restore(doc)
 	return path, len(doc.Messages), nil
 }
 

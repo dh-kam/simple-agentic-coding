@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // File is the parsed config.
@@ -30,18 +31,36 @@ func Load(path string) (*File, error) {
 	return &f, nil
 }
 
-// LoadEnv loads AGENT_CONFIG if set; otherwise returns an empty config. A read
-// or parse error is reported to stderr and treated as "no config" (don't fail
-// the whole program over an optional file).
+// DefaultMaxContextTokens is used when neither the config file nor the
+// environment sets a limit.
+const DefaultMaxContextTokens = 50000
+
+// LoadEnv loads AGENT_CONFIG if set, then fills unset fields from the
+// environment. A read or parse error is reported to stderr and treated as
+// "no config" (don't fail the whole program over an optional file).
+//
+// Resolving the environment here rather than at each call site is what keeps
+// the TUI and the one-shot CLI in agreement — AGENT_MAX_CONTEXT_TOKENS used to
+// be read only by the one-shot path and silently ignored in the TUI.
 func LoadEnv() *File {
-	path := os.Getenv("AGENT_CONFIG")
-	if path == "" {
-		return &File{}
+	f := &File{}
+	if path := os.Getenv("AGENT_CONFIG"); path != "" {
+		loaded, err := Load(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "⚠", err)
+		} else {
+			f = loaded
+		}
 	}
-	f, err := Load(path)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "⚠", err)
-		return &File{}
+	if f.Model == "" {
+		f.Model = os.Getenv("AGENT_MODEL")
+	}
+	if f.MaxContextTokens <= 0 {
+		if n, err := strconv.Atoi(os.Getenv("AGENT_MAX_CONTEXT_TOKENS")); err == nil && n > 0 {
+			f.MaxContextTokens = n
+		} else {
+			f.MaxContextTokens = DefaultMaxContextTokens
+		}
 	}
 	return f
 }

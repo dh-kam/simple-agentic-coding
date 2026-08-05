@@ -28,12 +28,21 @@ func NewTaskTool(run SubagentRunner) Tool {
 	}
 }
 
-func NewSubagentRunner(backend Backend, model, system string, tools []Tool) SubagentRunner {
+// NewSubagentRunner builds the runner behind the `task` tool.
+//
+// opts carries the parent's approval gate and lifecycle hooks — see
+// Agent.subagentOptions. A subagent that did not inherit them would be a hole
+// straight through the user's permission prompt, since it gets the same tools.
+//
+// tools is a function, not a slice, for the same reason: callers unregister
+// tools (config.disable_tools) *after* the task tool is built, and a captured
+// slice would hand the subagent a tool the operator had switched off.
+func NewSubagentRunner(backend Backend, model, system string, tools func() []Tool, opts ...Option) SubagentRunner {
 	return func(ctx context.Context, prompt string) (string, error) {
-		sub := New(backend, model, system)
-		for _, t := range tools {
+		sub := New(backend, model, system, opts...)
+		for _, t := range tools() {
 			if t.Name == "task" {
-				continue
+				continue // one level of delegation only
 			}
 			sub.RegisterTool(t)
 		}

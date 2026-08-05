@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/dh-kam/simple-agentic-coding/agent"
@@ -82,12 +83,7 @@ func SummarizeResources(refs []ResourceRef) string {
 	return b.String()
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
+func truncate(s string, n int) string { return agent.TruncRunes(s, n) }
 
 // transportFor picks the SDK transport for a server config: Streamable HTTP
 // (default) or SSE for URL servers, CommandTransport for stdio servers.
@@ -113,8 +109,24 @@ func transportFor(cfg ServerConfig) (mcpsdk.Transport, error) {
 // (from the MCP config) are forwarded in addition to non-credential vars.
 
 var credPrefixes = []string{
-	"ANTHROPIC", "OPENAI", "API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL",
-	"AWS_SECRET", "GITHUB_TOKEN", "DATABASE_URL", "PRIVATE_KEY",
+	"ANTHROPIC", "OPENAI", "API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD",
+	"PASSWD", "CREDENTIAL", "AWS_", "GITHUB_", "GITLAB_",
+	"PRIVATE_KEY", "_KEY", "KEY_", "COOKIE", "AUTH",
+	"GLM", "GEMINI", "OPENROUTER", "GROQ", "MISTRAL", "COHERE", "HUGGINGFACE",
+	"STRIPE", "TWILIO", "SENDGRID", "SLACK", "PYPI",
+	// connection strings carry the password inline
+	"DATABASE_URL", "REDIS_URL", "MONGODB_URI", "POSTGRES_URL", "SENTRY_DSN",
+	"VAULT_",
+}
+
+// credExact are names that carry credentials without matching any prefix.
+// SSH_AUTH_SOCK is the sharpest of them: forwarding it hands a third-party
+// npx/uvx package the use of the user's SSH agent.
+var credExact = map[string]bool{
+	"SSH_AUTH_SOCK": true, "KUBECONFIG": true, "DOCKER_CONFIG": true,
+	"MYSQL_PWD": true, "PGPASSFILE": true, "PGSERVICEFILE": true,
+	"GOOGLE_APPLICATION_CREDENTIALS": true, "AZURE_CLIENT_SECRET": true,
+	"NETRC": true, "GNUPGHOME": true,
 }
 
 func scrubCreds(inherit, extra []string) []string {
@@ -131,6 +143,9 @@ func scrubCreds(inherit, extra []string) []string {
 
 func isCredKey(key string) bool {
 	upper := strings.ToUpper(key)
+	if credExact[upper] {
+		return true
+	}
 	for _, p := range credPrefixes {
 		if strings.Contains(upper, p) {
 			return true
@@ -379,11 +394,14 @@ func LoadConfig(path string) (map[string]ServerConfig, error) {
 	}
 	var raw struct {
 		Servers map[string]struct {
-			Command   string   `json:"command"`
-			Args      []string `json:"args"`
-			Env       []string `json:"env"`
-			URL       string   `json:"url"`
-			Transport string   `json:"transport"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+			// Claude Desktop writes env as an object; earlier versions of this
+			// loader only accepted a KEY=VAL array and rejected the whole file
+			// on the documented format.
+			Env       envMap `json:"env"`
+			URL       string `json:"url"`
+			Transport string `json:"transport"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
@@ -404,4 +422,30 @@ func LoadConfig(path string) (map[string]ServerConfig, error) {
 		}
 	}
 	return out, nil
+}
+
+// envMap accepts either {"K":"V"} or ["K=V"] and yields KEY=VAL strings.
+type envMap []string
+
+func (e *envMap) UnmarshalJSON(b []byte) error {
+	var asList []string
+	if err := json.Unmarshal(b, &asList); err == nil {
+		*e = asList
+		return nil
+	}
+	var asObj map[string]string
+	if err := json.Unmarshal(b, &asObj); err != nil {
+		return fmt.Errorf(`env must be {"KEY":"VAL"} or ["KEY=VAL"]: %w`, err)
+	}
+	keys := make([]string, 0, len(asObj))
+	for k := range asObj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic child environment
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+asObj[k])
+	}
+	*e = out
+	return nil
 }

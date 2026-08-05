@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -91,7 +92,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// --- capture request ---
 	entry.Request.Method = req.Method
-	entry.Request.URL = req.URL.String()
+	// Gateways that take the key as a query parameter would otherwise leave it
+	// in the log verbatim.
+	entry.Request.URL = redactURL(req.URL)
 	// capture request headers
 	for name, vals := range req.Header {
 		for _, v := range vals {
@@ -115,7 +118,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if err != nil {
 		entry.Response.Status = 0
-		entry.Response.Content.Text = fmt.Sprintf("error: %v", err)
+		// *url.Error embeds the full URL, query string and all.
+		entry.Response.Content.Text = redactBody(fmt.Sprintf("error: %v", err))
 		t.Mu.Lock()
 		t.Log.Log.Entries = append(t.Log.Log.Entries, entry)
 		t.Mu.Unlock()
@@ -126,7 +130,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	entry.Response.Status = resp.StatusCode
 	for name, vals := range resp.Header {
 		for _, v := range vals {
-			entry.Response.Headers = append(entry.Response.Headers, HARHeader{Name: name, Value: v})
+			// Responses carry credentials too — Set-Cookie above all — and the
+			// log used to store their headers and bodies verbatim.
+			entry.Response.Headers = append(entry.Response.Headers, HARHeader{
+				Name: name, Value: redactKey(name, v),
+			})
 		}
 	}
 	entry.Response.Content.MimeType = resp.Header.Get("Content-Type")
@@ -147,31 +155,57 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 type recordingBody struct {
 	source io.ReadCloser
 	buf    bytes.Buffer
+	total  int // bytes seen, which may exceed what buf kept
 	entry  *HAREntry
 	tp     *Transport
 }
 
+// maxBodyBytes caps how much of one response body is kept in the log.
+const maxBodyBytes = 2 << 20 // 2 MiB
+
 func (r *recordingBody) Read(p []byte) (int, error) {
 	n, err := r.source.Read(p)
 	if n > 0 {
-		r.buf.Write(p[:n])
+		r.record(p[:n])
 	}
 	return n, err
 }
 
+// record buffers up to maxBodyBytes, counting everything that goes past.
+// The whole log is held in memory until the process exits, so an unbounded
+// buffer let one large response pin that much heap for the session.
+func (r *recordingBody) record(p []byte) {
+	r.total += len(p)
+	if room := maxBodyBytes - r.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		r.buf.Write(p)
+	}
+}
+
 func (r *recordingBody) Close() error {
 	// drain any remaining bytes
-	io.Copy(&r.buf, r.source)
+	io.Copy(writerFunc(r.record), r.source)
 	err := r.source.Close()
 
-	r.entry.Response.Content.Size = r.buf.Len()
-	r.entry.Response.Content.Text = r.buf.String()
+	text := redactBody(r.buf.String())
+	if r.total > r.buf.Len() {
+		text += fmt.Sprintf("\n…[truncated: %d of %d bytes recorded]", r.buf.Len(), r.total)
+	}
+	r.entry.Response.Content.Size = r.total
+	r.entry.Response.Content.Text = text
 
 	r.tp.Mu.Lock()
 	r.tp.Log.Log.Entries = append(r.tp.Log.Log.Entries, *r.entry)
 	r.tp.Mu.Unlock()
 	return err
 }
+
+// writerFunc adapts record to io.Writer for the drain in Close.
+type writerFunc func([]byte)
+
+func (f writerFunc) Write(p []byte) (int, error) { f(p); return len(p), nil }
 
 // Save writes the HAR log to a file as JSON.
 func (t *Transport) Save(path string) error {
@@ -182,6 +216,17 @@ func (t *Transport) Save(path string) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+// redactURL drops the query string and any userinfo: both routinely carry
+// credentials, and neither is worth keeping in a capture.
+func redactURL(u *url.URL) string {
+	c := *u
+	if c.RawQuery != "" {
+		c.RawQuery = "[redacted]"
+	}
+	c.User = nil
+	return c.String()
 }
 
 // redactBody scans text for common API key patterns and masks them.
@@ -204,14 +249,15 @@ func redactBody(text string) string {
 	return text
 }
 
-// redactKey masks API keys in header values.
+// redactKey masks credential-bearing header values.
 func redactKey(name, value string) string {
 	switch strings.ToLower(name) {
-	case "x-api-key", "authorization":
+	case "x-api-key", "authorization", "proxy-authorization",
+		"cookie", "set-cookie", "x-auth-token", "x-session-token":
 		if len(value) > 8 {
 			return value[:4] + "…" + value[len(value)-4:]
 		}
 		return "***"
 	}
-	return value
+	return redactBody(value)
 }

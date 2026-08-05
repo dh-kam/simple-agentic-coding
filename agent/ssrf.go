@@ -64,6 +64,28 @@ func validateURL(ctx context.Context, rawURL string) ([]net.IP, error) {
 	return out, nil
 }
 
+// reservedRanges are non-public networks that net.IP's own predicates miss.
+// They still reach infrastructure a fetch has no business touching: carrier
+// NAT and benchmark ranges are routable inside many hosting environments, and
+// 0.0.0.0/8 is a documented alias for the local host on Linux.
+var reservedRanges = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, cidr := range []string{
+		"100.64.0.0/10",      // RFC 6598 carrier-grade NAT
+		"198.18.0.0/15",      // RFC 2544 benchmarking
+		"192.0.0.0/24",       // RFC 6890 IETF protocol assignments
+		"0.0.0.0/8",          // "this network" — 0.x.y.z reaches localhost
+		"255.255.255.255/32", // limited broadcast
+		"::/128",             // unspecified
+		"100::/64",           // RFC 6666 discard-only
+	} {
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 // classifyIP returns a short reason for blocking the IP, or "" if it is
 // acceptable. Cloud metadata endpoints (169.254.169.254) live in the
 // link-local range, which is blocked here.
@@ -79,6 +101,14 @@ func classifyIP(ip net.IP) string {
 	}
 	if ip.IsUnspecified() {
 		return "unspecified"
+	}
+	if ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return "multicast"
+	}
+	for _, n := range reservedRanges {
+		if n.Contains(ip) {
+			return "reserved"
+		}
 	}
 	return ""
 }

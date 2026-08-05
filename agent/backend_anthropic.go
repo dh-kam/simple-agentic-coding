@@ -102,7 +102,15 @@ func chatMsgToAnthropic(m ChatMessage) (anthropic.MessageParam, error) {
 }
 
 func anthropicMsgToResponse(msg *anthropic.Message) *ChatResponse {
-	resp := &ChatResponse{StopReason: string(msg.StopReason)}
+	resp := &ChatResponse{
+		StopReason: string(msg.StopReason),
+		// Cache reads/writes are billed as input, so fold them in — otherwise
+		// a prompt-cached session reports far fewer input tokens than it used.
+		Usage: Usage{
+			InputTokens:  msg.Usage.InputTokens + msg.Usage.CacheCreationInputTokens + msg.Usage.CacheReadInputTokens,
+			OutputTokens: msg.Usage.OutputTokens,
+		},
+	}
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:

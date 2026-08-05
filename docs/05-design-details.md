@@ -18,9 +18,12 @@
 | **Provider 호환성** | GLM 등 호환 엔드포인트는 Messages API 공통 서브셋만 지원. adaptive thinking · compaction · 서버 도구(web_search/code_execution) · Files/Managed Agents 등은 Anthropic 전용 → [06-provider-config.md](./06-provider-config.md) | GLM에서 beta 기능 의존 시 요청 거부/무시 |
 
 > **구현:** 컨텍스트 관리는 프로젝트 루트의 `agent/compaction.go` (`WithMaxContextTokens`)로
-> 구현되어 있다. 입력 토큰 추정치(bytes/4)가 한도를 넘으면 오래된 **(assistant, tool_result) 쌍**
-> 단위로 LLM 요약으로 교체한다 — 쌍을 통째로 요약하므로 `tool_use`/`tool_result` 페어링이
-> 깨지지 않는다. GLM은 서버 compaction이 없어 이렇게 직접 한다.
+> 구현되어 있다. 입력 토큰 추정치(bytes/4)가 한도를 넘으면 오래된 턴을 LLM 요약으로 교체한다.
+> 자르는 지점은 항상 **라운드 경계**다 — 한 라운드는 assistant(또는 후속 user) 메시지 하나와
+> 그에 답하는 `tool_result` 전부이며, 병렬 tool call 이 N개면 한 라운드가 1+N개 메시지다.
+> 라운드 중간에서 자르면 대응하는 `tool_use` 가 사라진 고아 `tool_result` 가 남아 두 provider
+> 모두 요청을 거부하므로, `planCompaction` 은 `tool` 이 아닌 메시지 인덱스만 후보로 삼는다.
+> GLM은 서버 compaction이 없어 이렇게 직접 한다.
 
 ---
 

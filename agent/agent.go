@@ -50,6 +50,7 @@ func WithChangeHook(h ChangeHook) Option     { return func(a *Agent) { a.changeH
 // Agent drives the tool-use loop. NOT safe for concurrent use.
 type Agent struct {
 	backend          Backend
+	usage            *usageCounter
 	model            string
 	system           string
 	maxTokens        int64
@@ -66,8 +67,9 @@ type Agent struct {
 	onToolStart      ToolStartFunc
 	onToolEnd        ToolEndFunc
 	changeHook       ChangeHook
+	shells           *ShellRegistry
 	initialUser      string
-	totalUsage       Usage
+	runningSummary   string
 	messages         []ChatMessage
 }
 
@@ -84,11 +86,69 @@ func New(backend Backend, model, system string, opts ...Option) *Agent {
 	for _, o := range opts {
 		o(a)
 	}
+	// Meter every call that goes through this agent's backend — the main loop,
+	// the compaction summarizer, and any subagent handed a.backend all land here.
+	a.usage = &usageCounter{inner: a.backend}
+	a.backend = a.usage
 	if a.summarizer == nil {
 		a.summarizer = defaultSummarizer(a.backend, a.model)
 	}
 	return a
 }
+
+// usageCounter wraps a Backend and accumulates token usage across every call
+// made through it. Safe for concurrent use: subagents share the counter.
+type usageCounter struct {
+	inner Backend
+	mu    sync.Mutex
+	total Usage
+}
+
+func (u *usageCounter) Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error) {
+	resp, err := u.inner.Chat(ctx, req, onDelta)
+	if resp != nil {
+		u.mu.Lock()
+		u.total.InputTokens += resp.Usage.InputTokens
+		u.total.OutputTokens += resp.Usage.OutputTokens
+		u.mu.Unlock()
+	}
+	return resp, err
+}
+
+func (u *usageCounter) Total() Usage {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.total
+}
+
+// subagentOptions returns the settings a subagent must inherit from its parent.
+// The approval gate is the important one: without it a `task` call would run
+// run_command and friends behind the user's back, defeating the permission
+// prompt the parent agent is subject to.
+func (a *Agent) subagentOptions() []Option {
+	opts := []Option{WithMaxTokens(a.maxTokens), WithMaxIterations(a.maxIters)}
+	if a.approver != nil {
+		opts = append(opts, WithApprover(a.approver))
+	}
+	if a.onToolStart != nil {
+		opts = append(opts, WithOnToolStart(a.onToolStart))
+	}
+	if a.onToolEnd != nil {
+		opts = append(opts, WithOnToolEnd(a.onToolEnd))
+	}
+	if a.changeHook != nil {
+		opts = append(opts, WithChangeHook(a.changeHook))
+	}
+	if a.maxContextTokens > 0 {
+		opts = append(opts, WithMaxContextTokens(a.maxContextTokens), WithKeepRecentTurns(a.keepRecentTurns))
+	}
+	return opts
+}
+
+// Shells exposes the background-shell registry so the host can terminate
+// orphaned processes at shutdown. Nil unless the agent was built by
+// BuildCodingAssistant.
+func (a *Agent) Shells() *ShellRegistry { return a.shells }
 
 func (a *Agent) RegisterTool(t Tool) {
 	if _, exists := a.tools[t.Name]; !exists {
@@ -110,20 +170,64 @@ func (a *Agent) UnregisterTool(name string) {
 	}
 }
 
+// Tools returns the currently registered tools, in registration order.
+// Resolved lazily by the subagent runner so tools removed after construction
+// (config.disable_tools) are removed from sub-tasks as well.
+func (a *Agent) Tools() []Tool {
+	out := make([]Tool, 0, len(a.order))
+	for _, name := range a.order {
+		out = append(out, a.tools[name])
+	}
+	return out
+}
+
 func (a *Agent) History() []ChatMessage {
 	out := make([]ChatMessage, len(a.messages))
 	copy(out, a.messages)
 	return out
 }
 
+// Session is the persisted form of a conversation. InitialUser and Summary are
+// carried explicitly rather than re-parsed out of Messages[0]: compaction folds
+// the running summary into that message behind a text header, and recovering it
+// by splitting on that header would mangle any prompt that happened to contain
+// the same words.
+type Session struct {
+	Messages    []ChatMessage `json:"messages"`
+	InitialUser string        `json:"initial_user,omitempty"`
+	Summary     string        `json:"summary,omitempty"`
+}
+
+// Snapshot captures the state needed to continue this conversation later.
+func (a *Agent) Snapshot() Session {
+	return Session{Messages: a.History(), InitialUser: a.initialUser, Summary: a.runningSummary}
+}
+
+// Restore continues a saved conversation.
+func (a *Agent) Restore(s Session) {
+	a.messages = append(a.messages[:0], s.Messages...)
+	a.initialUser, a.runningSummary = s.InitialUser, s.Summary
+	// Sessions written before Session carried these fields only have the
+	// combined text; fall back to splitting it, which is why the header is
+	// matched from the end. Guarded on both fields so a session that supplies
+	// only Summary does not have it thrown away.
+	if a.initialUser == "" && a.runningSummary == "" && len(s.Messages) > 0 && s.Messages[0].Role == "user" {
+		a.initialUser, a.runningSummary = splitSummary(s.Messages[0].Content)
+	}
+}
+
+// Resume continues a conversation from its messages alone.
 func (a *Agent) Resume(msgs []ChatMessage) {
-	a.messages = append(a.messages[:0], msgs...)
+	a.Restore(Session{Messages: msgs})
 }
 
 // Run drives the tool-use loop until the model stops requesting tools.
 func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 	prompt := userInput
-	if a.planner != nil {
+	// Plan only when opening a conversation. Re-planning every follow-up spends
+	// an extra LLM round-trip on inputs like "고마워" and the plan is redundant
+	// anyway — the earlier one is still in the history.
+	if a.planner != nil && len(a.messages) == 0 {
 		plan, err := a.planner.Plan(ctx, userInput)
 		if err != nil {
 			return "", fmt.Errorf("planning: %w", err)
@@ -136,7 +240,12 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 		}
 	}
 
-	a.initialUser = prompt
+	// initialUser anchors compaction. Keep the turn that opened the
+	// conversation; overwriting it per turn would make compaction rewrite
+	// messages[0] with a later prompt and lose the original task.
+	if a.initialUser == "" {
+		a.initialUser = prompt
+	}
 	a.messages = append(a.messages, ChatMessage{Role: "user", Content: prompt})
 
 	for iter := 0; iter < a.maxIters; iter++ {
@@ -155,8 +264,6 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 			return "", fmt.Errorf("llm call (iter %d): %w", iter, err)
 		}
 
-		a.totalUsage.InputTokens += resp.Usage.InputTokens
-		a.totalUsage.OutputTokens += resp.Usage.OutputTokens
 		a.messages = append(a.messages, resp.ToAssistantMessage())
 
 		if !resp.IsToolUse() {
@@ -234,4 +341,7 @@ func (a *Agent) ToolDefs() []ToolDef {
 	return defs
 }
 
-func (a *Agent) TotalUsage() Usage { return a.totalUsage }
+// TotalUsage reports the tokens consumed by this agent, including its
+// compaction summarizer and any subagents sharing the same backend. An external
+// planner has its own backend handle and is not counted here.
+func (a *Agent) TotalUsage() Usage { return a.usage.Total() }

@@ -43,12 +43,14 @@ hello.txt            read_file 테스트용 픽스처
 - **명시적 planning** — 루프 진입 전, 도구 없는 단일 호출로 단계별 계획을 생성해 실행 컨텍스트에 주입 (`WithPlanner` / `WithOnPlan`). 자세한 건 [docs/05](./docs/05-design-details.md).
 - **스트리밍 출력** — 응답을 토큰 단위로 콜백 (`WithOnText`). `AnthropicClient`는 `Messages.NewStreaming` + `Accumulate`로 전체 응답을 조립하면서 텍스트 델타만 실시간 전달.
 - **동시 tool call** — 한 assistant 응답의 여러 `tool_use` 블록을 **병렬** 실행하고, 결과를 **한 user 메시지**로 묶어 반환 (이게 모델이 계속 병렬 호출을 하게 만드는 올바른 패턴).
-- **수동 컨텍스트 compaction** — 입력 토큰 추정치가 한도를 넘으면 오래된 (assistant, tool_result) 쌍을 LLM 요약으로 교체 (`WithMaxContextTokens` / `AGENT_MAX_CONTEXT_TOKENS`). GLM은 서버 compaction이 없어서 직접 구현; **쌍 단위**로 잘라 `tool_use`/`tool_result` 페어링을 유지한다.
+- **수동 컨텍스트 compaction** — 입력 토큰 추정치가 한도를 넘으면 오래된 턴을 LLM 요약으로 교체 (`WithMaxContextTokens` / `AGENT_MAX_CONTEXT_TOKENS`). GLM은 서버 compaction이 없어서 직접 구현; **라운드 경계**에서만 잘라 `tool_use`/`tool_result` 페어링을 유지한다 — 한 라운드는 assistant 메시지 + 그에 답하는 tool_result 전부이므로 병렬 tool call(1+N개 메시지)에서도 안전하다.
 - **Claude-Code-style 도구 세트** — `CCTools(base)` 가 아래 13개 도구를 한 번에 등록. 모든 파일 도구는 `base` 로 샌드박싱(`safePath`).
-- **승인(ask) 게이트** — `WithApprover` 로 각 tool_use 실행 전 승인; 거부 시 그 사유를 tool_result 로 모델에 돌려보낸다.
-- **Task 서브에이전트** — `task` 도구가 독립 작업을 별도 컨텍스트의 서브에이전트에 위임(1단계까지만). 병렬 팬아웃에 사용.
+- **승인(ask) 게이트** — `WithApprover` 로 각 tool_use 실행 전 승인; 거부 시 그 사유를 tool_result 로 모델에 돌려보낸다. 대상은 `agent.IsMutating` 이 판정하며(파일 쓰기·셸·git), **알 수 없는 도구(MCP 등)는 기본적으로 승인 대상**이다.
+- **영속 권한 규칙** — `.agentic/settings.json` 의 `allow_tools`/`deny_tools`/`mode`(`plan`·`auto-edit`·`full-auto`)가 프롬프트보다 먼저 적용된다. deny 가 allow 보다, 둘 다 mode 보다 우선한다. one-shot(`agentic ask`)은 답할 사람이 없으므로 규칙이 정하지 않은 도구는 실행되지만, `deny_tools` 와 `mode: "plan"` 은 동일하게 거부한다.
+- **샌드박스** — 파일 도구는 `base` 안으로 제한된다(`safePath`). 경로의 모든 구성요소에서 symlink 를 해석하며, 아직 없는 파일도 존재하는 최상위 조상까지 거슬러 올라가 검사하고, 타깃이 없는 dangling symlink 는 거부한다. 쓰기는 `O_NOFOLLOW` 로 열어 검사와 write 사이에 symlink 가 끼어드는 race 를 막고, `.git/` 과 `.agentic/` 은 어떤 도구도 쓸 수 없다(hook·permission 규칙·skill 은 곧 임의 실행이다).
+- **Task 서브에이전트** — `task` 도구가 독립 작업을 별도 컨텍스트의 서브에이전트에 위임(1단계까지만). 병렬 팬아웃에 사용. 서브에이전트는 부모의 **승인 게이트와 lifecycle hook 을 그대로 상속**한다.
 - **MCP 클라이언트 연동** — 외부 stdio/HTTP/SSE MCP 서버(filesystem/git/DB 등)의 도구를 자동 발견해 에이전트에 붙인다. **클라이언트 사이드**라 GLM에서도 동작(Anthropic의 서버사이드 `mcp_toolset`과 무관). 공식 Go SDK(`go-sdk`) 사용.
-- **Claude-Code-style TUI REPL** — `bubbletea` + `lipgloss` + `glamour` 로 인터랙티브 터미널. **멀티라인 입력**(textarea, `Enter` 전송 · `Ctrl+J` 줄바꿈, 박스가 내용에 맞게 확장), 스트리밍 마크다운, 도구 호출 스피너/✓✗, **파일 변경 diff 뷰**(write/edit/multi_edit 시 색칠된 unified diff, 60줄 캡), **권한 피커**(민감 도구 write/edit/multi_edit/run_command 호출 시 `allow`/`deny` 모달 — `WithApprover` 연동), `Ctrl+C` 실행 중단/종료, 슬래시 명령(`/help` `/clear` `/save` `/resume` `/exit`) + **Tab 자동완성**. 인자 없이 `go run .` 로 실행.
+- **Claude-Code-style TUI REPL** — `bubbletea` + `lipgloss` + `glamour` 로 인터랙티브 터미널. **멀티라인 입력**(textarea, `Enter` 전송 · `Ctrl+J` 줄바꿈, 박스가 내용에 맞게 확장), 스트리밍 마크다운, 도구 호출 스피너/✓✗, **파일 변경 diff 뷰**(write/edit/multi_edit 시 색칠된 unified diff, 60줄 캡), **권한 피커**(상태를 바꾸는 도구 호출 시 `allow`/`deny` 모달 — `WithApprover` 연동), `Ctrl+C` 실행 중단/종료, 슬래시 명령(`/help` `/clear` `/save` `/resume` `/undo` `/cost` `/status` `/exit`) + **Tab 자동완성**, `.agentic/commands/*.json` 사용자 정의 명령. 인자 없이 `go run .` 로 실행.
 - **대화 세션 저장/불러오기** — `/save`·`/resume` 으로 대화 이력을 JSON(`AGENT_SESSION`, 기본 `.agentic/session.json`)에 영속화; **프로세스를 재시작해도 이전 대화를 이어**간다.
 - **provider 무관** — Anthropic 정식 / GLM Coding Plan 모두 동작. beta 전용 기능(서버 compaction, web_search 등)에 기대지 않는다.
 
@@ -60,10 +62,32 @@ hello.txt            read_file 테스트용 픽스처
 | `notebook_edit` | `.ipynb` 셀 source 교체·삽입 (필드 보존) |
 | `run_command` · `bash_output` · `kill_shell` | 셸 실행 + **백그라운드**(프로세스 그룹 kill) |
 | `glob`(`**`) · `grep`(정규식) · `list_files` | 탐색 |
-| `web_fetch` | URL → 텍스트(HTML 태그 제거) |
+| `web_fetch` | URL → 텍스트(HTML 태그 제거). SSRF 방어: 사설/loopback/link-local 차단 + 검증한 IP 로 dial 고정, 리다이렉트마다 재검증 |
+| `web_search` · `git` · `git_commit` · `code_review` | 검색 · 허용목록 기반 git · 커밋 · diff 리뷰 |
 | `todo_write` | 작업 목록 추적 |
 | `task` | 서브에이전트 위임 (별도 등록) |
 | `<server>__<tool>` | MCP 서버가 노출한 도구 (자동 등록) |
+
+## 보안 경계와 알려진 한계
+
+이 도구는 **운영자 본인이 구동하는 개인용 코딩 에이전트**를 전제로 한다. 신뢰 경계는 "모델 출력은 신뢰하지 않는다"이며, 저장소 내용·웹 페이지·MCP 서버 응답을 통한 prompt injection 을 상수로 가정한다.
+
+강제되는 것:
+
+- 파일 도구는 `base` 밖을 읽거나 쓰지 못한다. 모든 경로 구성요소에서 symlink 를 해석하고, 아직 없는 파일도 존재하는 최상위 조상까지 검사하며, dangling symlink 는 거부한다. 쓰기는 `O_NOFOLLOW`.
+- `.git/` 과 `.agentic/` 은 어떤 도구로도 수정할 수 없다. hook·permission 규칙·skill 은 곧 다음 세션의 임의 실행이기 때문이다.
+- `git` 도구는 subcommand allowlist 에 더해 인자까지 검사한다. `config`/`remote`/`stash` 는 실행 불가, `--output`·`--no-index`·`--file` 계열은 거부, 절대 경로·`..`·pathspec magic(`:/`)·`<rev>:<path>` 도 거부, base 가 하위 디렉토리면 `-- .` 로 한정한다.
+- `web_fetch` 는 사설·loopback·link-local·CGNAT 등 비공개 대역을 차단하고, 검증한 IP 로 dial 을 고정하며, 리다이렉트마다 재검증·재고정한다.
+- `task` 서브에이전트는 부모의 승인 게이트를 상속하고, `disable_tools` 도 그대로 적용받는다.
+
+강제되지 않는 것 (설계상 또는 미해결):
+
+- **`run_command` 는 임의의 셸 명령을 실행한다.** 승인 게이트가 유일한 방어선이므로, `deny_tools` 나 `mode: "plan"` 없이 승인을 누르는 순간 샌드박스는 의미가 없다.
+- **one-shot(`agentic ask`)은 무인 모드다.** 규칙이 정하지 않은 도구는 프롬프트 없이 실행된다. 신뢰할 수 없는 입력을 다룰 때는 `.agentic/settings.json` 에 `mode: "plan"` 이나 `deny_tools` 를 두거나 TUI 를 쓸 것.
+- **`AGENTS.md`/`CLAUDE.md` 는 쓰기 가능하다.** 편집이 정상 작업이라 막지 않았지만, 이 파일들은 다음 세션의 system prompt 에 들어간다. 즉 신뢰 경계 안쪽이다.
+- **hardlink 는 막지 못한다.** base 안에 base 밖 파일을 가리키는 hardlink 가 미리 존재하면 쓰기가 그 파일을 덮어쓴다(`O_NOFOLLOW` 는 symlink 만 잡는다).
+- **`web_fetch`/`web_search` 는 승인 없이 실행된다.** 아웃바운드 요청은 exfiltration 채널이므로, 민감한 저장소에서는 `deny_tools` 로 막을 것.
+- **HAR 캡처는 기본 켜짐**이며 대화 전문(에이전트가 읽은 파일 내용 포함)을 `~/.agentic/hars/` 에 남긴다. API 키·쿠키는 마스킹되지만 소스 코드는 그대로다. `AGENT_HAR_DISABLE=1` 로 끌 수 있다.
 
 ## 설정 파일
 

@@ -458,8 +458,9 @@ if hook != nil {
 메시지 수 = 1 + 2 × (실행 반복 횟수)
 ```
 
-> **compaction**: `maxContextTokens`을 넘으면 오래된 (assistant, tool_result) 쌍을
-> LLM 요약으로 교체한다. 이 실행에서는 50000 토큰 한도에 도달하지 않아 미발동.
+> **compaction**: `maxContextTokens`을 넘으면 오래된 라운드(assistant 메시지 + 그에 답하는
+> `tool_result` 전부)를 LLM 요약으로 교체한다. 라운드 경계에서만 자르므로 병렬 tool call 이
+> 있어도 페어링이 깨지지 않는다. 이 실행에서는 50000 토큰 한도에 도달하지 않아 미발동.
 
 ---
 

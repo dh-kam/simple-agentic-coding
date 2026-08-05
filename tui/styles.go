@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dh-kam/simple-agentic-coding/agent"
+
 	"github.com/aymanbagabas/go-udiff"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -59,13 +61,7 @@ func renderTool(b *toolBlock, spinnerView string) string {
 	return lipgloss.JoinHorizontal(lipgloss.Left, icon, " ", name, detail)
 }
 
-func truncate(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
+func truncate(s string, n int) string { return agent.TruncRunes(s, n) }
 
 // summarizeArgs pulls a short, human-readable hint from a tool's JSON args
 // (path / command / pattern / url / prompt / query), compact otherwise.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -22,6 +23,13 @@ func InstallFromGitHub(input, skillDir string) ([]string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("git clone: %w\n%s", err, out)
 	}
+	return installFromClone(tmpDir, repoName, skillDir, input)
+}
+
+// installFromClone copies the skills found in an already-cloned tree into
+// skillDir. Split out from InstallFromGitHub so the confinement it enforces can
+// be tested without a network fetch.
+func installFromClone(tmpDir, repoName, skillDir, input string) ([]string, error) {
 	found := scanForSkills(tmpDir, repoName)
 	if len(found) == 0 {
 		return nil, fmt.Errorf("no SKILL.md found in %s", input)
@@ -29,9 +37,13 @@ func InstallFromGitHub(input, skillDir string) ([]string, error) {
 	os.MkdirAll(skillDir, 0755)
 	var installed []string
 	for _, s := range found {
-		name := s.skillName
-		if name == "" {
-			name = repoName
+		// The name comes out of the cloned repository's own SKILL.md, so it is
+		// attacker-controlled. Unchecked it flowed into filepath.Join and then
+		// into os.RemoveAll: `name: ../../../x` deleted a directory anywhere on
+		// disk and installed the skill there.
+		name, err := safeSkillName(s.skillName, repoName)
+		if err != nil {
+			return installed, err
 		}
 		dest := filepath.Join(skillDir, name)
 		os.RemoveAll(dest)
@@ -58,7 +70,7 @@ func ListInstalledSkills(skillDir string) {
 		if d == "" {
 			d = "(no desc)"
 		}
-		fmt.Printf("  • %s — %s\n", s.Name, truncStrSI(d, 70))
+		fmt.Printf("  • %s — %s\n", s.Name, TruncRunes(d, 70))
 	}
 }
 
@@ -72,26 +84,55 @@ func RemoveSkill(skillDir, name string) error {
 
 type skillFound struct{ content, skillName, baseDir string }
 
+// safeSkillName reduces a name declared by a downloaded repository to a single
+// harmless path segment, falling back to the repository name.
+func safeSkillName(declared, fallback string) (string, error) {
+	for _, candidate := range []string{declared, fallback} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == "." || candidate == ".." {
+			continue
+		}
+		// Reject rather than sanitize: a name that needs rewriting is not one
+		// the author chose, and silently installing under a different name
+		// hides the attempt.
+		if candidate != filepath.Base(candidate) ||
+			strings.ContainsAny(candidate, `/\`) ||
+			strings.HasPrefix(candidate, ".") {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("unusable skill name %q", declared)
+}
+
+// repoSegment matches a GitHub owner or repository name. Anchoring the whole
+// segment is what stops "owner/.." from becoming a repoName that escapes
+// skillDir when a repo declares no skill name of its own.
+var repoSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 func parseGitHubURL(input string) (cloneURL, repoName string, err error) {
 	input = strings.TrimSuffix(strings.TrimSpace(input), ".git")
+	var parts []string
 	switch {
 	case strings.HasPrefix(input, "https://github.com/"):
-		parts := strings.Split(strings.TrimPrefix(input, "https://github.com/"), "/")
-		if len(parts) >= 2 {
-			return input, parts[1], nil
-		}
+		parts = strings.Split(strings.TrimPrefix(input, "https://github.com/"), "/")
 	case strings.HasPrefix(input, "git@github.com:"):
-		parts := strings.Split(strings.TrimPrefix(input, "git@github.com:"), "/")
-		if len(parts) >= 2 {
-			return input, parts[1], nil
-		}
+		parts = strings.Split(strings.TrimPrefix(input, "git@github.com:"), "/")
 	default:
-		parts := strings.Split(input, "/")
-		if len(parts) == 2 {
-			return "https://github.com/" + input, parts[1], nil
+		if p := strings.Split(input, "/"); len(p) == 2 {
+			parts = p
+			input = "https://github.com/" + input
 		}
 	}
-	return "", "", fmt.Errorf("unrecognized: %s", input)
+	if len(parts) < 2 {
+		return "", "", fmt.Errorf("unrecognized: %s", input)
+	}
+	for _, seg := range parts[:2] {
+		if !repoSegment.MatchString(seg) || seg == "." || seg == ".." {
+			return "", "", fmt.Errorf("invalid owner/repo segment %q", seg)
+		}
+	}
+	return input, parts[1], nil
 }
 
 func scanForSkills(root, repoName string) []skillFound {
@@ -122,12 +163,4 @@ func scanForSkills(root, repoName string) []skillFound {
 		}
 	}
 	return found
-}
-
-func truncStrSI(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
 }

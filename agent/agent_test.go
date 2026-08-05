@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -152,13 +154,235 @@ func TestSafePath(t *testing.T) {
 	}
 }
 
-func TestPlanCompaction(t *testing.T) {
-	for _, c := range []struct{ msgs, keep, want int }{
-		{0, 3, 0}, {1, 3, 0}, {3, 1, 0}, {5, 1, 1}, {7, 2, 1}, {4, 1, 0},
-	} {
-		if got := planCompaction(c.msgs, c.keep); got != c.want {
-			t.Errorf("planCompaction(%d,%d)=%d want %d", c.msgs, c.keep, got, c.want)
+// pairs builds a history of `rounds` rounds, each an assistant message
+// followed by toolsPerRound tool results.
+func pairs(rounds, toolsPerRound int) []ChatMessage {
+	msgs := []ChatMessage{{Role: "user", Content: "task"}}
+	for r := 0; r < rounds; r++ {
+		var calls []ChatToolCall
+		for k := 0; k < toolsPerRound; k++ {
+			calls = append(calls, ChatToolCall{ID: fmt.Sprintf("r%d-%d", r, k)})
 		}
+		msgs = append(msgs, ChatMessage{Role: "assistant", ToolCalls: calls})
+		for k := 0; k < toolsPerRound; k++ {
+			msgs = append(msgs, ChatMessage{Role: "tool", ToolCallID: fmt.Sprintf("r%d-%d", r, k)})
+		}
+	}
+	return msgs
+}
+
+func TestPlanCompaction(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		rounds, tools int
+		keep, want    int
+	}{
+		{"nothing to drop", 1, 1, 3, 0},
+		{"exactly keep", 3, 1, 3, 0},
+		{"single-tool rounds", 5, 1, 3, 5},
+		{"two-tool rounds", 5, 2, 2, 10},
+		{"parallel tool calls", 4, 3, 3, 5},
+	} {
+		msgs := pairs(c.rounds, c.tools)
+		if got := planCompaction(msgs, c.keep); got != c.want {
+			t.Errorf("%s: planCompaction(%d msgs, keep %d)=%d want %d", c.name, len(msgs), c.keep, got, c.want)
+		}
+	}
+}
+
+// A cut in the middle of a round would strand a tool_result whose tool_use has
+// been summarized away; both provider APIs reject that history.
+func TestPlanCompaction_neverStrandsToolResults(t *testing.T) {
+	for tools := 1; tools <= 4; tools++ {
+		for rounds := 1; rounds <= 8; rounds++ {
+			for keep := 1; keep <= 4; keep++ {
+				msgs := pairs(rounds, tools)
+				cut := planCompaction(msgs, keep)
+				if cut == 0 {
+					continue
+				}
+				if cut >= len(msgs) {
+					t.Fatalf("tools=%d rounds=%d keep=%d: cut %d out of range (%d msgs)", tools, rounds, keep, cut, len(msgs))
+				}
+				if msgs[cut].Role == "tool" {
+					t.Errorf("tools=%d rounds=%d keep=%d: cut at %d leaves an orphan tool_result", tools, rounds, keep, cut)
+				}
+			}
+		}
+	}
+}
+
+// Each compaction must fold the previous summary in. Dropping it meant every
+// compaction silently discarded whatever the one before it had condensed.
+func TestCompaction_carriesTheRunningSummary(t *testing.T) {
+	var sawPrevious []bool
+	round := 0
+	ag := New(&fakeClient{responses: []*ChatResponse{
+		toolUseResp("noop", nil), toolUseResp("noop", nil), toolUseResp("noop", nil),
+		toolUseResp("noop", nil), textResp("done"),
+	}}, "m", "s",
+		// Above what messages[0] costs on its own — below that, compaction
+		// correctly declines because it could never get under the limit.
+		WithMaxContextTokens(30), WithKeepRecentTurns(1),
+		WithSummarizer(func(_ context.Context, initial string, prefix []ChatMessage) (string, error) {
+			round++
+			found := false
+			for _, m := range prefix {
+				if strings.Contains(m.Content, "FACT-A") {
+					found = true
+				}
+			}
+			sawPrevious = append(sawPrevious, found)
+			if initial != "ORIGINAL TASK" {
+				t.Errorf("summarizer round %d got initialUser %q, want the original task", round, initial)
+			}
+			return fmt.Sprintf("FACT-%c", 'A'+round-1), nil
+		}),
+	)
+	ag.RegisterTool(Tool{Name: "noop", InputSchema: map[string]any{},
+		Run: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }})
+
+	if _, err := ag.Run(context.Background(), "ORIGINAL TASK"); err != nil {
+		t.Fatal(err)
+	}
+	if round < 2 {
+		t.Fatalf("expected at least 2 compactions, got %d", round)
+	}
+	if !sawPrevious[1] {
+		t.Error("the second compaction did not receive the first summary; earlier findings are lost")
+	}
+	if !strings.HasPrefix(ag.messages[0].Content, "ORIGINAL TASK") {
+		t.Errorf("messages[0] lost the original task: %q", ag.messages[0].Content)
+	}
+}
+
+// A compacted session that is saved and resumed must not nest another summary
+// header inside what it thinks is the task.
+func TestResume_splitsOutAnEarlierSummary(t *testing.T) {
+	ag := New(&fakeClient{}, "m", "s")
+	ag.Resume([]ChatMessage{
+		{Role: "user", Content: "ORIGINAL TASK" + summaryHeader + "S1"},
+		{Role: "assistant", Content: "ok"},
+	})
+	if ag.initialUser != "ORIGINAL TASK" {
+		t.Errorf("initialUser = %q, want the task without the summary", ag.initialUser)
+	}
+	if ag.runningSummary != "S1" {
+		t.Errorf("runningSummary = %q, want S1", ag.runningSummary)
+	}
+	if got := strings.Count(ag.messages[0].Content, summaryHeader); got != 1 {
+		t.Errorf("header appears %d times after resume", got)
+	}
+}
+
+// keepRecentTurns used to be fixed, so a history whose newest rounds alone
+// blew the budget never compacted and every iteration re-sent an oversized
+// request.
+func TestCompaction_shrinksKeepWhenRecentRoundsAreHuge(t *testing.T) {
+	msgs := pairs(3, 1) // 1 user + 3 rounds → only 3 round starts
+	if got := planCompaction(msgs, 3); got != 0 {
+		t.Fatalf("precondition: planCompaction with keep=3 should be a no-op, got %d", got)
+	}
+	calls := 0
+	// Small enough that the history is over budget, large enough that
+	// messages[0] on its own is not — otherwise compaction is pointless and
+	// correctly declines to run.
+	ag := New(&fakeClient{responses: []*ChatResponse{textResp("done")}}, "m", "s",
+		WithMaxContextTokens(20), WithKeepRecentTurns(3),
+		WithSummarizer(func(context.Context, string, []ChatMessage) (string, error) {
+			calls++
+			return "S", nil
+		}))
+	ag.initialUser = "task"
+	ag.messages = msgs
+	if estimateTokens(msgs[:1]) > 20 || estimateTokens(msgs) <= 20 {
+		t.Fatalf("precondition: first=%d total=%d, want first<=20<total",
+			estimateTokens(msgs[:1]), estimateTokens(msgs))
+	}
+	if err := ag.maybeCompact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 {
+		t.Error("compaction silently gave up instead of keeping fewer rounds")
+	}
+	if len(ag.messages) >= len(msgs) {
+		t.Errorf("history did not shrink: %d → %d", len(msgs), len(ag.messages))
+	}
+	if ag.messages[1].Role == "tool" {
+		t.Error("shrinking keepRounds broke tool_use/tool_result pairing")
+	}
+}
+
+// An opening prompt that alone exceeds the budget can never be compacted under
+// it, so paying for a summarizer call on every iteration is pure waste.
+func TestCompaction_givesUpWhenTheTaskAloneExceedsTheBudget(t *testing.T) {
+	calls := 0
+	ag := New(&fakeClient{}, "m", "s",
+		WithMaxContextTokens(50), WithKeepRecentTurns(1),
+		WithSummarizer(func(context.Context, string, []ChatMessage) (string, error) {
+			calls++
+			return "S", nil
+		}))
+	ag.initialUser = strings.Repeat("x", 4000)
+	ag.messages = pairs(4, 1)
+	ag.messages[0] = ChatMessage{Role: "user", Content: ag.initialUser}
+
+	for i := 0; i < 5; i++ {
+		if err := ag.maybeCompact(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 0 {
+		t.Errorf("summarizer ran %d times on a history it cannot shrink under the limit", calls)
+	}
+	// It must still fold: refusing outright would let the history grow without
+	// limit until the provider rejects it.
+	if len(ag.messages) >= 9 {
+		t.Errorf("history did not shrink at all: %d messages", len(ag.messages))
+	}
+	if ag.messages[1].Role == "tool" {
+		t.Error("summary-free folding broke tool_use/tool_result pairing")
+	}
+	if !strings.Contains(ag.messages[0].Content, "생략") {
+		t.Error("the elision was not disclosed to the model")
+	}
+}
+
+// Growth must stay bounded even when the budget can never be met.
+func TestCompaction_boundedWhenHopeless(t *testing.T) {
+	ag := New(&fakeClient{}, "m", "s",
+		WithMaxContextTokens(50), WithKeepRecentTurns(2),
+		WithSummarizer(func(context.Context, string, []ChatMessage) (string, error) {
+			t.Error("summarizer should not be called when it cannot help")
+			return "", nil
+		}))
+	ag.initialUser = strings.Repeat("x", 4000)
+	ag.messages = []ChatMessage{{Role: "user", Content: ag.initialUser}}
+
+	for round := 0; round < 40; round++ {
+		ag.messages = append(ag.messages,
+			ChatMessage{Role: "assistant", ToolCalls: []ChatToolCall{{ID: "t"}}},
+			ChatMessage{Role: "tool", ToolCallID: "t", Content: strings.Repeat("y", 200)})
+		if err := ag.maybeCompact(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(ag.messages) > 8 {
+		t.Errorf("history grew to %d messages; compaction is not bounding it", len(ag.messages))
+	}
+}
+
+// Multi-turn histories interleave extra user messages; those start rounds too.
+func TestPlanCompaction_multiTurn(t *testing.T) {
+	msgs := pairs(2, 2)
+	msgs = append(msgs, ChatMessage{Role: "user", Content: "follow-up"})
+	msgs = append(msgs, pairs(2, 2)[1:]...)
+	cut := planCompaction(msgs, 2)
+	if cut == 0 {
+		t.Fatal("expected a compaction point")
+	}
+	if msgs[cut].Role == "tool" {
+		t.Errorf("cut at %d lands on a tool result", cut)
 	}
 }
 
@@ -204,7 +428,3 @@ func (f *fakePlanner) Plan(_ context.Context, in string) (string, error) {
 	f.got = in
 	return f.plan, nil
 }
-
-// extractText is used nowhere now but may be referenced by old tests.
-// Keeping a stub to avoid import errors.
-func extractTextUnused(_ string) string { return "" }

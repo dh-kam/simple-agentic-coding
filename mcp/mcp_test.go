@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dh-kam/simple-agentic-coding/agent"
@@ -271,4 +272,91 @@ func TestConnectResourcesPrompts(t *testing.T) {
 	if out2 != "hi there" {
 		t.Errorf("get_prompt output = %q, want hi there", out2)
 	}
+}
+
+// Claude Desktop writes env as an object; the loader used to accept only a
+// KEY=VAL array and rejected the entire config file on the documented format.
+func TestLoadConfig_envObjectAndArray(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	objPath := write("obj.json", `{"mcpServers":{"fs":{"command":"npx","env":{"B":"2","A":"1"}}}}`)
+	got, err := LoadConfig(objPath)
+	if err != nil {
+		t.Fatalf("object form rejected: %v", err)
+	}
+	// sorted, so the child environment is deterministic
+	if want := []string{"A=1", "B=2"}; !slicesEqual(got["fs"].Env, want) {
+		t.Errorf("env = %v, want %v", got["fs"].Env, want)
+	}
+
+	arrPath := write("arr.json", `{"mcpServers":{"fs":{"command":"npx","env":["A=1","B=2"]}}}`)
+	got, err = LoadConfig(arrPath)
+	if err != nil {
+		t.Fatalf("array form rejected: %v", err)
+	}
+	if want := []string{"A=1", "B=2"}; !slicesEqual(got["fs"].Env, want) {
+		t.Errorf("env = %v, want %v", got["fs"].Env, want)
+	}
+
+	badPath := write("bad.json", `{"mcpServers":{"fs":{"command":"npx","env":42}}}`)
+	if _, err := LoadConfig(badPath); err == nil {
+		t.Error("a bogus env value should be an error")
+	}
+}
+
+// MCP servers are usually third-party npx/uvx packages; the inherited
+// environment must not hand them the user's credentials.
+func TestScrubCreds_coversRealCredentialNames(t *testing.T) {
+	inherit := []string{
+		"ANTHROPIC_API_KEY=x", "OPENAI_API_KEY=x", "GITHUB_TOKEN=x",
+		"AWS_ACCESS_KEY_ID=x", "AWS_SECRET_ACCESS_KEY=x", "SSH_AUTH_SOCK=/tmp/agent",
+		"KUBECONFIG=/home/u/.kube/config", "MYSQL_PWD=x", "DOCKER_CONFIG=/x",
+		"GLM_KEY=x", "OPENROUTER_KEY=x", "STRIPE_SK=x", "DATABASE_URL=x",
+		"GOOGLE_APPLICATION_CREDENTIALS=/x", "SLACK_BOT_TOKEN=x",
+		// these must survive: the server still needs a usable environment
+		"PATH=/usr/bin", "HOME=/home/u", "LANG=en_US.UTF-8", "TERM=xterm",
+	}
+	got := scrubCreds(inherit, []string{"EXPLICIT=ok"})
+
+	for _, kv := range got {
+		key := strings.SplitN(kv, "=", 2)[0]
+		switch key {
+		case "PATH", "HOME", "LANG", "TERM", "EXPLICIT":
+		default:
+			t.Errorf("credential-bearing %q was forwarded to the MCP child", key)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "HOME=/home/u", "EXPLICIT=ok"} {
+		if !slicesContain(got, want) {
+			t.Errorf("%q was dropped; the server needs a usable environment", want)
+		}
+	}
+}
+
+func slicesContain(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,11 +9,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,7 +40,7 @@ func NewWriteTool(base string, hook ChangeHook) Tool {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("parse args: %w", err)
 			}
-			full, err := safePath(base, in.Path)
+			full, err := safeWritePath(base, in.Path)
 			if err != nil {
 				return "", err
 			}
@@ -45,7 +48,7 @@ func NewWriteTool(base string, hook ChangeHook) Tool {
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 				return "", err
 			}
-			if err := os.WriteFile(full, []byte(in.Content), 0o644); err != nil {
+			if err := writeFileNoFollow(full, []byte(in.Content), 0o644); err != nil {
 				return "", err
 			}
 			if hook != nil {
@@ -81,7 +84,7 @@ func NewEditTool(base string, hook ChangeHook) Tool {
 			if in.OldString == "" {
 				return "", errors.New("old_string must not be empty")
 			}
-			full, err := safePath(base, in.Path)
+			full, err := safeWritePath(base, in.Path)
 			if err != nil {
 				return "", err
 			}
@@ -103,7 +106,7 @@ func NewEditTool(base string, hook ChangeHook) Tool {
 			} else {
 				updated = strings.Replace(s, in.OldString, in.NewString, 1)
 			}
-			if err := os.WriteFile(full, []byte(updated), 0o644); err != nil {
+			if err := writeFileNoFollow(full, []byte(updated), 0o644); err != nil {
 				return "", err
 			}
 			if hook != nil {
@@ -162,6 +165,36 @@ func NewGlobTool(base string) Tool {
 	}
 }
 
+const (
+	maxGrepMatches   = 50
+	maxGrepFileBytes = 5 << 20 // 5 MiB
+)
+
+// errStopWalk aborts a filepath.WalkDir early. filepath.SkipDir cannot do this
+// from a file callback — it only skips the remaining entries of the containing
+// directory, so a per-match cap enforced with SkipDir leaks in proportion to
+// the number of directories walked.
+var errStopWalk = errors.New("stop walk")
+
+// skipDirName lists directories never worth searching: huge, generated, and
+// full of false positives.
+func skipDirName(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "dist", ".venv", "__pycache__":
+		return true
+	}
+	return false
+}
+
+// isBinary reports whether data looks like a binary file. A NUL byte in the
+// first 8 KiB is the same heuristic grep itself uses.
+func isBinary(data []byte) bool {
+	if len(data) > 8192 {
+		data = data[:8192]
+	}
+	return bytes.IndexByte(data, 0) >= 0
+}
+
 // NewGrepTool searches file contents under base with a regex.
 func NewGrepTool(base string) Tool {
 	return Tool{
@@ -208,9 +241,15 @@ func NewGrepTool(base string) Tool {
 				}
 			}
 			var out []string
-			matchCount := 0
+			truncated := false
 			err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-				if walkErr != nil || d.IsDir() {
+				if walkErr != nil {
+					return nil
+				}
+				if d.IsDir() {
+					if skipDirName(d.Name()) {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 				if in.Glob != "" {
@@ -219,8 +258,22 @@ func NewGrepTool(base string) Tool {
 						return nil
 					}
 				}
-				data, err := os.ReadFile(path)
+				info, err := d.Info()
 				if err != nil {
+					return nil
+				}
+				// Never follow a symlink: os.ReadFile would open the target,
+				// which may sit outside base. read_file is confined by
+				// safePath, and grep must not be the weaker door.
+				//
+				// IsRegular also rules out FIFOs and devices, where a read
+				// would block the tool forever. The size cap matters because
+				// grep loads whole files, and read_file already rejects >10MB.
+				if !info.Mode().IsRegular() || info.Size() > maxGrepFileBytes {
+					return nil
+				}
+				data, err := os.ReadFile(path)
+				if err != nil || isBinary(data) {
 					return nil
 				}
 				rel, err := filepath.Rel(cleanBase, path)
@@ -229,21 +282,28 @@ func NewGrepTool(base string) Tool {
 				}
 				lines := strings.Split(string(data), "\n")
 				for i, line := range lines {
-					if re.MatchString(line) {
-						out = append(out, fmt.Sprintf("%s:%d: %s", filepath.ToSlash(rel), i+1, strings.TrimRight(line, "\r")))
-						matchCount++
-						if matchCount >= 50 {
-							return filepath.SkipDir // stop early-ish
-						}
+					if !re.MatchString(line) {
+						continue
+					}
+					out = append(out, fmt.Sprintf("%s:%d: %s", filepath.ToSlash(rel), i+1, TruncRunes(strings.TrimRight(line, "\r"), 300)))
+					if len(out) >= maxGrepMatches {
+						// Returning SkipDir here only skips the rest of *this*
+						// directory — the walk continues elsewhere. Only a real
+						// error stops it, so use a sentinel.
+						truncated = true
+						return errStopWalk
 					}
 				}
 				return nil
 			})
-			if err != nil && err != filepath.SkipDir {
+			if err != nil && !errors.Is(err, errStopWalk) {
 				return "", err
 			}
 			if len(out) == 0 {
 				return "no matches", nil
+			}
+			if truncated {
+				out = append(out, fmt.Sprintf("…[%d개에서 잘림 — 패턴을 좁히거나 path/glob으로 범위를 지정하세요]", maxGrepMatches))
 			}
 			return strings.Join(out, "\n"), nil
 		},
@@ -297,6 +357,71 @@ func NewListFilesTool(base string) Tool {
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 var wsRe = regexp.MustCompile(`\s+`)
 
+// pinnedIPs holds the addresses web_fetch is allowed to dial. It is mutated by
+// CheckRedirect and read by DialContext, which run on different goroutines
+// inside net/http.
+type pinnedIPs struct {
+	mu  sync.Mutex
+	ips []net.IP
+}
+
+func (p *pinnedIPs) get() []net.IP {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ips
+}
+
+func (p *pinnedIPs) set(ips []net.IP) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ips = ips
+}
+
+// maxRedirects bounds a web_fetch redirect chain.
+const maxRedirects = 5
+
+// checkRedirect validates every hop and re-pins the dial to its addresses.
+// Without it each hop would be dialled at the *first* host's IPs: safe against
+// SSRF but silently wrong, since the request lands on a server that was never
+// the redirect target — and a hop pointing at an internal address would never
+// be examined at all.
+func checkRedirect(pin *pinnedIPs) func(*http.Request, []*http.Request) error {
+	return func(r *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return fmt.Errorf("too many redirects (%d)", len(via))
+		}
+		hopIPs, err := validateURL(r.Context(), r.URL.String())
+		if err != nil {
+			return fmt.Errorf("redirect to %s: %w", redactURL(r.URL), err)
+		}
+		pin.set(hopIPs)
+		return nil
+	}
+}
+
+// redactURL strips query and userinfo before a URL reaches an error message:
+// redirect targets routinely carry tokens, and tool errors go into the
+// transcript and the HAR log.
+func redactURL(u *url.URL) string {
+	c := *u
+	c.RawQuery = ""
+	c.User = nil
+	c.Fragment = ""
+	return c.String()
+}
+
+// webFetchText turns a fetched body into the text handed to the model: HTML is
+// crudely tag-stripped, and the result is capped. The cap counts runes, not
+// bytes — slicing bytes split a character on any non-ASCII page.
+func webFetchText(contentType string, body []byte) string {
+	text := string(body)
+	if strings.Contains(strings.ToLower(contentType), "html") {
+		text = htmlTagRe.ReplaceAllString(text, " ")
+		text = wsRe.ReplaceAllString(text, " ")
+	}
+	return TruncRunes(strings.TrimSpace(text), 8000)
+}
+
 // NewWebFetchTool fetches a URL and returns text (HTML is crudely tag-stripped).
 func NewWebFetchTool(timeout time.Duration) Tool {
 	return Tool{
@@ -330,14 +455,18 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			}
 			// Pin the dial to a validated IP so the host cannot re-resolve to
 			// a different (private) address after validation.
+			pin := &pinnedIPs{ips: ips}
 			transport := &http.Transport{
+				// Each redirect hop re-pins; a pooled connection keyed by the
+				// previous host would sidestep that.
+				DisableKeepAlives: true,
 				DialContext: func(dctx context.Context, _, addr string) (net.Conn, error) {
 					_, port, err := net.SplitHostPort(addr)
 					if err != nil {
 						return nil, err
 					}
 					var lastErr error
-					for _, ip := range ips {
+					for _, ip := range pin.get() {
 						c, derr := (&net.Dialer{}).DialContext(dctx, "tcp", net.JoinHostPort(ip.String(), port))
 						if derr == nil {
 							return c, nil
@@ -350,7 +479,11 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 					return nil, fmt.Errorf("no validated IP to dial")
 				},
 			}
-			httpClient := &http.Client{Timeout: 15 * time.Second, Transport: transport}
+			httpClient := &http.Client{
+				Timeout:       timeout,
+				Transport:     transport,
+				CheckRedirect: checkRedirect(pin),
+			}
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				return "", err
@@ -360,16 +493,7 @@ func NewWebFetchTool(timeout time.Duration) Tool {
 			if err != nil {
 				return "", err
 			}
-			text := string(body)
-			if strings.Contains(strings.ToLower(resp.Header.Get("content-type")), "html") {
-				text = htmlTagRe.ReplaceAllString(text, " ")
-				text = wsRe.ReplaceAllString(text, " ")
-			}
-			text = strings.TrimSpace(text)
-			if len(text) > 8000 {
-				text = text[:8000] + "\n…[truncated]"
-			}
-			return text, nil
+			return webFetchText(resp.Header.Get("content-type"), body), nil
 		},
 	}
 }
@@ -415,11 +539,15 @@ func NewTodoTool() (Tool, *[]Todo) {
 // BuildCodingAssistant builds a coding-assistant Agent with the full tool set.
 func BuildCodingAssistant(backend Backend, model, system, base string, extra ...Option) *Agent {
 	ag := New(backend, model, system, extra...)
-	tools, _, _ := CCTools(base, ag.changeHook)
+	tools, _, reg := CCTools(base, ag.changeHook)
 	for _, t := range tools {
 		ag.RegisterTool(t)
 	}
-	ag.RegisterTool(NewTaskTool(NewSubagentRunner(backend, model, system, tools)))
+	ag.shells = reg
+	// ag.backend (not the raw backend) so subagent tokens roll up into
+	// TotalUsage; ag.Tools resolved at call time so UnregisterTool reaches the
+	// subagent too; subagentOptions so it inherits the approval gate.
+	ag.RegisterTool(NewTaskTool(NewSubagentRunner(ag.backend, model, system, ag.Tools, ag.subagentOptions()...)))
 	return ag
 }
 
@@ -435,7 +563,7 @@ func CCTools(base string, hook ChangeHook) ([]Tool, *[]Todo, *ShellRegistry) {
 		NewEditTool(base, hook),
 		NewMultiEditTool(base, hook),
 		NewNotebookEditTool(base),
-		NewRunCommandTool(base, 10*time.Second, reg),
+		NewRunCommandTool(base, commandTimeout(), reg),
 		NewBashOutputTool(reg),
 		NewKillShellTool(reg),
 		NewGlobTool(base),
@@ -443,8 +571,9 @@ func CCTools(base string, hook ChangeHook) ([]Tool, *[]Todo, *ShellRegistry) {
 		NewListFilesTool(base),
 		NewWebFetchTool(15 * time.Second),
 		NewWebSearchTool(),
-		NewGitTool(),
-		NewGitCommitTool(),
+		NewGitTool(base),
+		NewGitCommitTool(base),
+		NewReviewTool(base),
 		todoTool,
 	}, todos, reg
 }
@@ -518,7 +647,7 @@ func NewMultiEditTool(base string, hook ChangeHook) Tool {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("parse args: %w", err)
 			}
-			full, err := safePath(base, in.Path)
+			full, err := safeWritePath(base, in.Path)
 			if err != nil {
 				return "", err
 			}
@@ -546,7 +675,7 @@ func NewMultiEditTool(base string, hook ChangeHook) Tool {
 				}
 				applied += count
 			}
-			if err := os.WriteFile(full, []byte(s), 0o644); err != nil {
+			if err := writeFileNoFollow(full, []byte(s), 0o644); err != nil {
 				return "", err
 			}
 			if hook != nil {
@@ -586,7 +715,7 @@ func NewNotebookEditTool(base string) Tool {
 			if in.Mode == "" {
 				in.Mode = "replace"
 			}
-			full, err := safePath(base, in.Path)
+			full, err := safeWritePath(base, in.Path)
 			if err != nil {
 				return "", err
 			}
@@ -656,7 +785,7 @@ func NewNotebookEditTool(base string) Tool {
 			if err != nil {
 				return "", err
 			}
-			if err := os.WriteFile(full, out, 0o644); err != nil {
+			if err := writeFileNoFollow(full, out, 0o644); err != nil {
 				return "", err
 			}
 			return fmt.Sprintf("%s: %s done", in.Path, in.Mode), nil

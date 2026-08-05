@@ -21,8 +21,22 @@ type OpenAIBackend struct {
 	http    *http.Client
 }
 
-func NewOpenAIBackend(apiKey, baseURL string) *OpenAIBackend {
-	return &OpenAIBackend{apiKey: apiKey, baseURL: baseURL, http: http.DefaultClient}
+// NewOpenAIBackend builds an OpenAI-compatible backend. base is the transport
+// to send through — pass the HAR capture transport to record traffic, or nil
+// for the default. Callers must not hand in an *http.Client with a Timeout:
+// streamed answers legitimately outlive any fixed deadline, so the guards here
+// are on connect and on time-to-first-byte instead.
+func NewOpenAIBackend(apiKey, baseURL string, base http.RoundTripper) *OpenAIBackend {
+	if base == nil {
+		base = NewHTTPTransport()
+	}
+	return &OpenAIBackend{
+		apiKey:  apiKey,
+		baseURL: strings.TrimSuffix(baseURL, "/"),
+		http: &http.Client{
+			Transport: base,
+		},
+	}
 }
 
 func (b *OpenAIBackend) Chat(ctx context.Context, req ChatRequest, onDelta func(string)) (*ChatResponse, error) {
@@ -32,7 +46,10 @@ func (b *OpenAIBackend) Chat(ctx context.Context, req ChatRequest, onDelta func(
 		return nil, fmt.Errorf("openai: marshal: %w", err)
 	}
 
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", b.baseURL+"/chat/completions", bytes.NewReader(jsonBody))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", b.baseURL+"/chat/completions", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("openai: build request: %w", err)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
 
@@ -64,6 +81,11 @@ func chatReqToOpenAI(req ChatRequest) map[string]any {
 		"max_tokens": openAIMaxTokens(req.MaxTokens), // GLM OpenAI endpoint caps lower than Anthropic
 		"messages":   msgs,
 		"stream":     true,
+	}
+	// Streaming responses omit usage unless asked. Not every OpenAI-compatible
+	// server accepts the field, so allow turning it back off.
+	if os.Getenv("AGENT_OPENAI_NO_STREAM_OPTIONS") != "1" {
+		result["stream_options"] = map[string]any{"include_usage": true}
 	}
 
 	if len(req.Tools) > 0 {
@@ -137,6 +159,7 @@ func parseOpenAIStream(body io.Reader, onDelta func(string)) (*ChatResponse, err
 	var text strings.Builder
 	var toolCalls []toolCallAccum
 	var finishReason string
+	var usage Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -150,6 +173,10 @@ func parseOpenAIStream(body io.Reader, onDelta func(string)) (*ChatResponse, err
 		var chunk openAIChunk
 		if e := json.Unmarshal([]byte(data), &chunk); e != nil {
 			continue
+		}
+		// The usage chunk arrives last and carries no choices.
+		if chunk.Usage != nil {
+			usage = Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens}
 		}
 		for _, c := range chunk.Choices {
 			if c.Delta.Content != "" {
@@ -183,6 +210,7 @@ func parseOpenAIStream(body io.Reader, onDelta func(string)) (*ChatResponse, err
 	resp := &ChatResponse{
 		Content:    text.String(),
 		StopReason: "end_turn",
+		Usage:      usage,
 	}
 	switch finishReason {
 	case "tool_calls":
@@ -217,6 +245,10 @@ type openAIChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage"`
 }
 
 type toolCallAccum struct {
@@ -226,13 +258,11 @@ type toolCallAccum struct {
 }
 
 func openAIMaxTokens(requested int64) int64 {
-	cap := int64(8192)
-	if v := osGetenv("AGENT_OPENAI_MAX_TOKENS"); v != "" {
-		if n, err := atoi64(v); err == nil && n > 0 {
-			cap = n
+	limit := int64(8192)
+	if v := os.Getenv("AGENT_OPENAI_MAX_TOKENS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			limit = n
 		}
 	}
-	return min64(requested, cap)
+	return min64(requested, limit)
 }
-func osGetenv(k string) string       { return os.Getenv(k) }
-func atoi64(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }

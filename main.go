@@ -15,10 +15,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -58,42 +56,55 @@ const (
 	cReset  = "\033[0m"
 )
 
-// makeClient creates an LLMClient based on AGENT_API (default: anthropic).
+// makeClient creates a Backend based on AGENT_API (default: anthropic).
 // Supports: "anthropic" (Anthropic SDK) and "openai" (OpenAI-compatible API).
+// har, when non-nil, records traffic for *either* backend — it used to be
+// wired only into the Anthropic path, so OpenAI/GLM sessions announced a HAR
+// file and then wrote an empty one.
 func makeClient(apiKey, baseURL string, har *capture.Transport) agent.Backend {
+	var transport http.RoundTripper = agent.NewHTTPTransport()
+	if har != nil {
+		har.Base = transport
+		transport = har
+	}
+
 	apiType := os.Getenv("AGENT_API")
 	if apiType == "" {
 		apiType = "anthropic"
 	}
-
-	// For Anthropic: use NewAnthropicBackend (with optional HAR)
 	if apiType == "anthropic" {
-		if har != nil {
-			httpClient := &http.Client{Transport: har}
-			return agent.NewAnthropicBackend(apiKey, baseURL, option.WithHTTPClient(httpClient))
-		}
-		return agent.NewAnthropicBackend(apiKey, baseURL)
+		return agent.NewAnthropicBackend(apiKey, baseURL,
+			option.WithHTTPClient(&http.Client{Transport: transport}))
 	}
 
-	// For OpenAI: use NewOpenAIClient
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	c := agent.NewOpenAIBackend(apiKey, baseURL)
 	fmt.Fprintf(os.Stderr, cDim+"🔌 OpenAI backend: %s"+cReset+"\n", baseURL)
-	return c
+	return agent.NewOpenAIBackend(apiKey, baseURL, transport)
 }
 
-func main() {
+// main keeps no logic of its own so that run()'s defers — saving the HAR log
+// above all — still execute on the error paths. log.Fatal and os.Exit skip
+// deferred calls, which is how every failed session used to lose its capture.
+func main() { os.Exit(run()) }
+
+// fail prints an error and returns the process exit code, so callers can
+// `return fail(...)` from run() and let its defers unwind.
+func fail(format string, args ...any) int {
+	fmt.Fprintf(os.Stderr, cRed+"✗ "+format+cReset+"\n", args...)
+	return 1
+}
+
+func run() int {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("agentic %s (commit %s, %s)\n", version, commit, date)
-		return
+		return 0
 	}
 
 	// Skills management subcommands (no API key needed).
 	if len(os.Args) > 1 && os.Args[1] == "skills" {
-		handleSkills(os.Args[2:])
-		return
+		return handleSkills(os.Args[2:])
 	}
 
 	// Load .env but protect security-sensitive vars from being overridden
@@ -132,14 +143,11 @@ func main() {
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		log.Fatal("ANTHROPIC_API_KEY 가 필요합니다 (.env 또는 환경변수)")
+		return fail("ANTHROPIC_API_KEY 가 필요합니다 (.env 또는 환경변수)")
 	}
 	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
 	cfg := config.LoadEnv()
-	model := os.Getenv("AGENT_MODEL")
-	if cfg.Model != "" {
-		model = cfg.Model
-	}
+	model := cfg.Model
 	if model == "" {
 		model = "claude-opus-5"
 	}
@@ -149,19 +157,19 @@ func main() {
 	}
 	base, err := os.Getwd()
 	if err != nil {
-		log.Fatal(err)
+		return fail("%s", err)
 	}
 
 	// Doctor diagnostic.
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		fmt.Println(agent.RunDiagnostics(model, baseURL))
-		return
+		return 0
 	}
 
 	// Terminal setup.
 	if len(os.Args) > 1 && os.Args[1] == "terminal-setup" {
 		fmt.Println(agent.SetupTerminal())
-		return
+		return 0
 	}
 
 	mcpTools, mcpClients, mcpCatalog, mcpWarnings := loadMCP(context.Background())
@@ -195,16 +203,16 @@ func main() {
 	if len(promptArgs) == 0 {
 		// No args → interactive TUI REPL.
 		if err := tui.Run(makeClient(apiKey, baseURL, harTransport), model, base, extraTools, mcpSuffix+skillSummary); err != nil {
-			log.Fatal(err)
+			return fail("%s", err)
 		}
-		return
+		return 0
 	}
 	// Strip "ask" or "-p" prefix.
 	if promptArgs[0] == "ask" || promptArgs[0] == "-p" {
 		promptArgs = promptArgs[1:]
 	}
 	if len(promptArgs) == 0 {
-		log.Fatal("프롬프트를 입력하세요: agentic ask \"your prompt\"")
+		return fail("프롬프트를 입력하세요: agentic ask \"your prompt\"")
 	}
 	task := strings.Join(promptArgs, " ")
 
@@ -213,19 +221,10 @@ func main() {
 	if dir := os.Getenv("AGENT_RECORD_DIR"); dir != "" {
 		rec, err := agent.NewRecorder(client, dir)
 		if err != nil {
-			log.Fatal(err)
+			return fail("%s", err)
 		}
 		client = rec
 		fmt.Fprintf(os.Stderr, cDim+"🗄  recording to %s"+cReset+"\n", dir)
-	}
-
-	maxCtx := 50000
-	if cfg.MaxContextTokens > 0 {
-		maxCtx = cfg.MaxContextTokens
-	} else if v := os.Getenv("AGENT_MAX_CONTEXT_TOKENS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			maxCtx = n
-		}
 	}
 
 	// Accumulate the answer for glamour rendering at the end.
@@ -233,7 +232,8 @@ func main() {
 
 	ag := agent.BuildCodingAssistant(client, model, system, base,
 		agent.WithMaxTokens(128000),
-		agent.WithMaxContextTokens(maxCtx),
+		agent.WithMaxContextTokens(cfg.MaxContextTokens),
+		agent.WithApprover(oneShotApprover(agent.LoadSettings(base))),
 		agent.WithPlanner(agent.NewLLMPlanner(client, model)),
 		agent.WithOnPlan(func(p string) {
 			fmt.Printf(cDim+"📝 %s"+cReset+"\n\n", truncStr(p, 200))
@@ -262,13 +262,32 @@ func main() {
 		ag.UnregisterTool(name)
 	}
 
-	if _, err := ag.Run(context.Background(), task); err != nil {
-		fmt.Fprintf(os.Stderr, cRed+"✗ %s"+cReset+"\n", err)
-		os.Exit(1)
-	}
+	// Background shells outlive the agent loop; without this they are orphaned
+	// when the process exits.
+	defer ag.Shells().KillAll()
 
-	// Glamour-render the accumulated answer.
+	_, runErr := ag.Run(context.Background(), task)
 	renderAnswer(answer.String())
+	if u := ag.TotalUsage(); u.InputTokens+u.OutputTokens > 0 {
+		fmt.Fprintf(os.Stderr, cDim+"💰 tokens: in %d · out %d"+cReset+"\n", u.InputTokens, u.OutputTokens)
+	}
+	if runErr != nil {
+		return fail("%s", runErr)
+	}
+	return 0
+}
+
+// oneShotApprover is the permission gate for `agentic ask`. Nobody is at the
+// keyboard, so a call the rules do not decide runs. The persistent rules still
+// apply — deny_tools and mode:"plan" refuse exactly as they do in the TUI,
+// which is the only way to hold back a non-interactive run.
+func oneShotApprover(s *agent.Settings) agent.Approver {
+	return func(name string, _ json.RawMessage) (bool, string) {
+		if s.Decide(name) == agent.DecideDeny {
+			return false, ".agentic/settings.json 규칙에 의해 차단됨"
+		}
+		return true, ""
+	}
 }
 
 // renderAnswer renders the agent's final answer as styled markdown.
@@ -333,16 +352,10 @@ func summarizeArgsCLI(args json.RawMessage) string {
 	return ""
 }
 
-func truncStr(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
+func truncStr(s string, n int) string { return agent.TruncRunes(s, n) }
 
-// handleSkills processes the `agentic skills` subcommand.
-func handleSkills(args []string) {
+// handleSkills processes the `agentic skills` subcommand and returns an exit code.
+func handleSkills(args []string) int {
 	skillDir := os.Getenv("AGENT_SKILLS_DIR")
 	if skillDir == "" {
 		skillDir = ".agentic/skills"
@@ -355,20 +368,18 @@ func handleSkills(args []string) {
 		fmt.Println("  agentic skills remove <name>         Remove a skill")
 		fmt.Println()
 		agent.ListInstalledSkills(skillDir)
-		return
+		return 0
 	}
 
 	switch args[0] {
 	case "install":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: agentic skills install <github-url|owner/repo>")
-			os.Exit(1)
+			return fail("Usage: agentic skills install <github-url|owner/repo>")
 		}
 		fmt.Printf("Installing from %s ...\n", args[1])
 		names, err := agent.InstallFromGitHub(args[1], skillDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, cRed+"✗ %s"+cReset+"\n", err)
-			os.Exit(1)
+			return fail("%s", err)
 		}
 		for _, n := range names {
 			fmt.Printf("  "+cGreen+"✓"+cReset+" installed: %s\n", n)
@@ -380,19 +391,17 @@ func handleSkills(args []string) {
 
 	case "remove":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: agentic skills remove <name>")
-			os.Exit(1)
+			return fail("Usage: agentic skills remove <name>")
 		}
 		if err := agent.RemoveSkill(skillDir, args[1]); err != nil {
-			fmt.Fprintf(os.Stderr, cRed+"✗ %s"+cReset+"\n", err)
-			os.Exit(1)
+			return fail("%s", err)
 		}
 		fmt.Printf("  "+cGreen+"✓"+cReset+" removed: %s\n", args[1])
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown skills command: %s\n", args[0])
-		os.Exit(1)
+		return fail("unknown skills command: %s", args[0])
 	}
+	return 0
 }
 
 func loadMCP(ctx context.Context) ([]agent.Tool, []*mcp.Client, []mcp.ResourceRef, []string) {

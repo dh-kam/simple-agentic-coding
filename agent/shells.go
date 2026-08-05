@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // This file implements background shells: run_command can start a command in
@@ -163,8 +162,12 @@ func NewKillShellTool(reg *ShellRegistry) Tool {
 	}
 }
 
-// CleanupStale removes shells that have been idle for longer than maxAge.
-func (r *ShellRegistry) CleanupStale(maxAge time.Duration) int {
+// Reap drops shells whose process has already exited, so the registry does not
+// grow for the life of the session.
+func (r *ShellRegistry) Reap() int {
+	if r == nil {
+		return 0
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	count := 0
@@ -177,4 +180,22 @@ func (r *ShellRegistry) CleanupStale(maxAge time.Duration) int {
 		}
 	}
 	return count
+}
+
+// KillAll terminates every live background shell. Call it at shutdown:
+// backgrounded processes are in their own process group and otherwise outlive
+// the agent that started them.
+func (r *ShellRegistry) KillAll() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	ids := make([]string, 0, len(r.shells))
+	for id := range r.shells {
+		ids = append(ids, id)
+	}
+	r.mu.Unlock()
+	for _, id := range ids {
+		_ = r.Kill(id)
+	}
 }
