@@ -660,7 +660,7 @@ func TestCheckGitArgs_allowsLegitimateInvocations(t *testing.T) {
 		{"branch", "-m", "old-name", "new-name"},
 		{"rev-parse", "--show-toplevel"},
 	} {
-		if err := checkGitArgs(parts[0], parts[1:]); err != nil {
+		if _, err := checkGitArgs(parts[0], parts[1:], true); err != nil {
 			t.Errorf("checkGitArgs(%q) rejected a legitimate command: %v", parts, err)
 		}
 	}
@@ -678,12 +678,12 @@ func TestCheckGitArgs_valueFlagsAreSubcommandScoped(t *testing.T) {
 		{"show", []string{"-m", "../secret.txt"}},
 		{"diff", []string{"-m", "/etc/passwd"}},
 	} {
-		if err := checkGitArgs(c.subcmd, c.args); err == nil {
+		if _, err := checkGitArgs(c.subcmd, c.args, true); err == nil {
 			t.Errorf("git %s %q was allowed", c.subcmd, c.args)
 		}
 	}
 	// but the message form still works where -m really takes a value
-	if err := checkGitArgs("commit", []string{"-m", "../not a path"}); err != nil {
+	if _, err := checkGitArgs("commit", []string{"-m", "../not a path"}, true); err != nil {
 		t.Errorf("commit -m rejected: %v", err)
 	}
 }
@@ -1470,12 +1470,12 @@ func TestCheckGitArgs_shortMessageClusters(t *testing.T) {
 		{"commit", []string{"-a", "-m", "fix: crash"}},
 		{"tag", []string{"-am", "release: v1", "v1"}},
 	} {
-		if err := checkGitArgs(c.subcmd, c.args); err != nil {
+		if _, err := checkGitArgs(c.subcmd, c.args, true); err != nil {
 			t.Errorf("git %s %q rejected: %v", c.subcmd, c.args, err)
 		}
 	}
 	// but a cluster ending in m does not exempt log, where -m takes no value
-	if err := checkGitArgs("log", []string{"-pm", "../secret.txt"}); err == nil {
+	if _, err := checkGitArgs("log", []string{"-pm", "../secret.txt"}, true); err == nil {
 		t.Error("log -pm ../secret.txt was allowed")
 	}
 }
@@ -1501,7 +1501,7 @@ func TestCheckShortCluster(t *testing.T) {
 		{"log", "-O/etc/passwd", "", true},
 		{"diff", "-zzz", "", true}, // unknown letter
 	} {
-		pending, _, err := checkShortCluster(c.subcmd, c.token)
+		pending, _, err := checkShortCluster(c.subcmd, c.token, true)
 		if (err != nil) != c.wantErr {
 			t.Errorf("checkShortCluster(%q, %q) err=%v, wantErr=%v", c.subcmd, c.token, err, c.wantErr)
 			continue
@@ -1520,7 +1520,7 @@ func TestCheckGitArgs_optionalValuesDoNotEatOperands(t *testing.T) {
 		{"--stat", "../secret.txt"},
 		{"--abbrev", "../secret.txt"},
 	} {
-		if err := checkGitArgs("log", args); err == nil {
+		if _, err := checkGitArgs("log", args, true); err == nil {
 			t.Errorf("git log %q was allowed; the optional-value flag swallowed the operand", args)
 		}
 	}
@@ -1528,7 +1528,7 @@ func TestCheckGitArgs_optionalValuesDoNotEatOperands(t *testing.T) {
 	for _, args := range [][]string{
 		{"--decorate=short"}, {"--stat=200"}, {"--abbrev=8"}, {"-M50"}, {"-U3"},
 	} {
-		if err := checkGitArgs("log", args); err != nil {
+		if _, err := checkGitArgs("log", args, true); err != nil {
 			t.Errorf("git log %q rejected: %v", args, err)
 		}
 	}

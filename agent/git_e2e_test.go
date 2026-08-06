@@ -119,55 +119,137 @@ func TestGitOptions_excludeEveryDangerousOption(t *testing.T) {
 		"--alternate-refs",
 		"--stdin",
 		"--help", "--help-all", "-h",
-		"--no-verify",
 		"--parseopt", "--sq-quote", "--local-env-vars",
 	}
 	// Spellings whose meaning depends on the subcommand. -p is a display flag
 	// for log/diff/show but interactive hunk selection for add/commit; -i is
 	// --regexp-ignore-case for log and --include for commit, but --interactive
 	// for add.
+	// rev-parse's --no-verify negates "check that the object name is valid" and
+	// is harmless; only commit's skips the user's hooks.
 	forbiddenFor := map[string][]string{
 		"add":    {"-p", "--patch", "-i", "--interactive", "-e", "--edit"},
-		"commit": {"-p", "--patch", "--interactive", "-e", "--edit"},
-		"tag":    {"-e", "--edit", "--sign", "-s", "--local-user", "-u"},
+		"commit": {"-p", "--patch", "--interactive", "-e", "--edit", "--no-verify", "--verify"},
+		"tag":    {"-e", "--edit", "--sign", "-s", "--local-user", "-u", "--verify"},
 		"branch": {"--edit-description"},
 	}
 
-	check := func(where string, opts map[string]gitOpt, banned []string) {
+	// Reachability, not table membership: lookupGitOpt also admits --no-X
+	// whenever --X is listed, so checking the map alone would miss an option
+	// resurrected through its negation.
+	check := func(subcmd string, banned []string) {
 		for _, bad := range banned {
-			if _, listed := opts[bad]; listed {
-				t.Errorf("%s allows %q, which reads/writes a file, redirects git, "+
-					"or needs a terminal", where, bad)
+			if _, ok := lookupGitOpt(subcmd, bad); ok {
+				t.Errorf("git %s accepts %q, which reads/writes a file, redirects git, "+
+					"needs a terminal, or bypasses the user's hooks", subcmd, bad)
 			}
 		}
 	}
-	for subcmd, opts := range gitOptions {
-		check("gitOptions["+subcmd+"]", opts, alwaysForbidden)
-		check("gitOptions["+subcmd+"]", opts, forbiddenFor[subcmd])
-	}
-	check("gitCommonOpts", gitCommonOpts, alwaysForbidden)
-	for _, banned := range forbiddenFor {
-		check("gitCommonOpts", gitCommonOpts, banned)
+	for subcmd := range gitOptions {
+		check(subcmd, alwaysForbidden)
+		check(subcmd, forbiddenFor[subcmd])
 	}
 }
 
-// A value classified as text or opaque skips the path check, so nothing that
-// git resolves as a filesystem path may be classified that way.
+// A value classified as text or opaque skips the path check entirely, so no
+// option whose value git resolves as a filesystem path may be classified that
+// way. Asserting the classification by inspection proved worthless — the
+// earlier version of this test only logged — so this feeds each such option a
+// path to a file above base and checks that its contents never come back.
 func TestGitOptions_noPathHidesBehindATextValue(t *testing.T) {
-	pathish := map[string]bool{
-		"--relative": true, // genuinely a path, and classified as one
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
 	}
+	_, base := gitRepoWithSubdir(t)
+	tool := NewGitTool(base)
+
+	const secret = "ROOT-SECRET-ABOVE-BASE"
+	for _, victim := range []string{"../secret.txt", "/etc/hostname"} {
+		for subcmd, opts := range gitOptions {
+			for flag, o := range opts {
+				if o.val != valText && o.val != valOpaque {
+					continue // valPath and valRef are path-checked already
+				}
+				var forms []string
+				if strings.HasPrefix(flag, "--") {
+					forms = append(forms, subcmd+" "+flag+"="+victim)
+					if !o.optional {
+						forms = append(forms, subcmd+" "+flag+" "+victim)
+					}
+				} else if o.glue {
+					forms = append(forms, subcmd+" "+flag+victim)
+				}
+				for _, cmd := range forms {
+					args, _ := json.Marshal(map[string]string{"command": cmd})
+					out, _ := tool.Run(context.Background(), args)
+					if strings.Contains(out, secret) {
+						t.Errorf("git %s leaked a file above base — %q is classified as "+
+							"free text but git reads it as a path:\n%s", cmd, flag, out)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Options whose value git resolves as a path must be classified valPath, so it
+// goes through checkGitOperand. The leak probe above cannot see this one:
+// --relative only rewrites the prefix diff prints, so misclassifying it leaks
+// no content — but it would still let a path past the operand rules.
+func TestGitOptions_knownPathValuesAreClassifiedAsPaths(t *testing.T) {
+	pathValued := map[string][]string{
+		"diff": {"--relative"},
+		"log":  {"--relative"},
+		"show": {"--relative"},
+	}
+	for subcmd, flags := range pathValued {
+		for _, flag := range flags {
+			o, ok := gitOptions[subcmd][flag]
+			if !ok {
+				continue // dropping it entirely is fine; misclassifying it is not
+			}
+			if o.val != valPath {
+				t.Errorf("gitOptions[%q][%q] takes a path but is classified %v", subcmd, flag, o.val)
+			}
+		}
+	}
+}
+
+// An option that carries no value must not be marked glue or optional; those
+// only describe how a value arrives.
+func TestGitOptions_valuelessOptionsCarryNoValueHints(t *testing.T) {
 	for subcmd, opts := range gitOptions {
 		for flag, o := range opts {
-			if o.val == valPath && !pathish[flag] {
-				t.Logf("note: %s %s is path-checked", subcmd, flag)
-			}
-			// An option that takes a value must say which kind; valNone with a
-			// value would silently accept anything attached to it.
 			if o.val == valNone && (o.glue || o.optional) {
 				t.Errorf("gitOptions[%q][%q]: glue/optional set on a valueless option", subcmd, flag)
 			}
 		}
+	}
+}
+
+// gitDeniedFlags is documented as a second line of defence behind the
+// allowlist. Without this, deleting it entirely would break no test.
+func TestGitDeniedFlags_areConsulted(t *testing.T) {
+	if len(gitDeniedFlags) == 0 {
+		t.Fatal("the denylist is empty; the second line of defence is gone")
+	}
+	for _, flag := range gitDeniedFlags {
+		if err := gitFlagDenied(flag); err == nil {
+			t.Errorf("gitFlagDenied(%q) returned nil", flag)
+		}
+	}
+	// and it fires even when the allowlist would have admitted the option
+	saved := gitOptions["log"]["--output"]
+	gitOptions["log"]["--output"] = gitOpt{val: valText}
+	defer func() {
+		if saved == (gitOpt{}) {
+			delete(gitOptions["log"], "--output")
+		} else {
+			gitOptions["log"]["--output"] = saved
+		}
+	}()
+	if _, err := checkGitArgs("log", []string{"--output=/tmp/x"}, true); err == nil {
+		t.Error("an option added to the allowlist by mistake was not caught by the denylist")
 	}
 }
 
@@ -194,19 +276,31 @@ func TestGitOptions_optionalFlagMatchesGit(t *testing.T) {
 		"commit", "-m", "i").Run()
 
 	// gitRequiresValue asks git itself: invoking the option with nothing after
-	// it draws "requires a value" only when the value is mandatory.
+	// it draws "requires a value" only when the value is mandatory. This works
+	// for short options too, which an earlier version of this test skipped on
+	// the mistaken grounds that short forms only ever take glued values — the
+	// distinction it exists to catch applies to them equally.
 	gitRequiresValue := func(subcmd, flag string) bool {
 		out, _ := exec.Command("git", "-C", repo, subcmd, flag).CombinedOutput()
 		s := strings.ToLower(string(out))
 		return strings.Contains(s, "requires a value") || strings.Contains(s, "requires an argument")
 	}
 
+	tables := map[string]map[string]gitOpt{"": gitCommonOpts}
 	for subcmd, opts := range gitOptions {
+		tables[subcmd] = opts
+	}
+	for subcmd, opts := range tables {
+		probeWith := subcmd
+		if probeWith == "" {
+			probeWith = "log" // gitCommonOpts applies everywhere; log accepts them
+		}
 		for flag, o := range opts {
-			if o.val == valNone || !strings.HasPrefix(flag, "--") {
-				continue // booleans and short forms carry glued values only
+			if o.val == valNone {
+				continue
 			}
-			required := gitRequiresValue(subcmd, flag)
+			_ = probeWith
+			required := gitRequiresValue(probeWith, flag)
 			switch {
 			case !required && !o.optional:
 				t.Errorf("gitOptions[%q][%q] is marked required but git takes its value as "+
@@ -215,6 +309,94 @@ func TestGitOptions_optionalFlagMatchesGit(t *testing.T) {
 				t.Logf("note: %s %s is marked optional but git requires a value; "+
 					"strict, not unsafe", subcmd, flag)
 			}
+		}
+	}
+}
+
+// Confinement rests on a "." pathspec, and a pathspec only constrains path
+// resolution. An operand that names an object directly sidesteps it: `show
+// HEAD^{tree}` lists the whole worktree and `show <blob-sha>` prints a file
+// outright — and `status --porcelain=v2` hands out the object ids of files
+// above base to feed it.
+func TestGitTool_objectOperandsCannotEscapeBase(t *testing.T) {
+	repo, base := gitRepoWithSubdir(t)
+	tool := NewGitTool(base)
+	run := func(cmd string) (string, error) {
+		args, _ := json.Marshal(map[string]string{"command": cmd})
+		return tool.Run(context.Background(), args)
+	}
+
+	// the object id of a file above base, obtained outside the tool
+	sha, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD:secret.txt").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	blob := strings.TrimSpace(string(sha))
+
+	for _, cmd := range []string{
+		"show HEAD^{tree}",
+		"show HEAD^{tree}:secret.txt",
+		"show " + blob,
+		"show " + blob[:8],
+		"log " + blob,
+		"diff " + blob,
+	} {
+		out, err := run(cmd)
+		if err == nil {
+			t.Errorf("git %s was allowed:\n%s", cmd, out)
+		}
+		if strings.Contains(out, "ROOT-SECRET-ABOVE-BASE") {
+			t.Errorf("git %s leaked a file above base:\n%s", cmd, out)
+		}
+	}
+
+	// and the id must not be obtainable through the tool in the first place
+	for _, cmd := range []string{"status --porcelain=v2", "status --porcelain", "status --short"} {
+		out, err := run(cmd)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(out, "secret.txt") {
+			t.Errorf("git %s named a file above base:\n%s", cmd, out)
+		}
+	}
+}
+
+// add -A and add -u act on the whole worktree from any subdirectory, so
+// without a pathspec they pull files above base into the object database.
+func TestGitTool_addCannotStageAboveBase(t *testing.T) {
+	repo, base := gitRepoWithSubdir(t)
+	tool := NewGitTool(base)
+
+	for _, cmd := range []string{"add -A", "add -u", "add ."} {
+		args, _ := json.Marshal(map[string]string{"command": cmd})
+		if out, err := tool.Run(context.Background(), args); err != nil {
+			t.Fatalf("git %s: %v\n%s", cmd, err, out)
+		}
+		staged, _ := exec.Command("git", "-C", repo, "diff", "--cached", "--name-only").Output()
+		if strings.Contains(string(staged), "secret.txt") {
+			t.Errorf("git %s staged a file above base:\n%s", cmd, staged)
+		}
+		exec.Command("git", "-C", repo, "reset", "-q").Run()
+	}
+}
+
+// tag's -v is --verify, which shells out to gpg — not --verbose. Sharing the
+// short letter through gitCommonOpts let it past the table that excludes
+// --verify for tag.
+func TestGitTool_shortOptionsAreSubcommandScoped(t *testing.T) {
+	base := t.TempDir()
+	if _, ok := lookupGitOpt("tag", "-v"); ok {
+		t.Error("tag -v is --verify and must not be admitted as --verbose")
+	}
+	args, _ := json.Marshal(map[string]string{"command": "tag -v v1"})
+	if _, err := NewGitTool(base).Run(context.Background(), args); err == nil {
+		t.Error("git tag -v was allowed")
+	}
+	// the letters that really do mean verbose/quiet still work
+	for _, sub := range []string{"status", "add", "commit", "branch"} {
+		if _, ok := lookupGitOpt(sub, "-v"); !ok {
+			t.Errorf("%s -v (verbose) was lost", sub)
 		}
 	}
 }

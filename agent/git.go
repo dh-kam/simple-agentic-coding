@@ -37,11 +37,22 @@ var gitDeniedFlags = []string{
 	"--file", "-F", "--pathspec-from-file", "--template", "--add-file",
 }
 
-// gitReadsWholeRepo lists subcommands that ignore cmd.Dir and report on the
-// entire repository. When base is a subdirectory they would show files the
+// gitReadsWholeRepo lists subcommands that ignore cmd.Dir and act on the
+// entire repository. When base is a subdirectory they would reach files the
 // rest of the tool surface keeps out of reach, so a "." pathspec is appended
 // unless the caller supplied one.
-var gitReadsWholeRepo = map[string]bool{"diff": true, "log": true, "show": true}
+//
+// status reports every change in the worktree, above base included — and its
+// --porcelain=v2 output hands out the object ids of those files. add -A and
+// add -u likewise stage the whole worktree from any subdirectory, pulling
+// files above base into the object database.
+var gitReadsWholeRepo = map[string]bool{
+	"diff": true, "log": true, "show": true, "status": true, "add": true,
+}
+
+// gitPathspecOperands lists subcommands whose bare operands are pathspecs
+// rather than revisions, so naming one already confines the command.
+var gitPathspecOperands = map[string]bool{"status": true, "add": true}
 
 // checkGitArgs validates one invocation against the option allowlist in
 // gitopts.go. Anything not listed there is refused.
@@ -50,7 +61,9 @@ var gitReadsWholeRepo = map[string]bool{"diff": true, "log": true, "show": true}
 // option may carry its value as --opt=value or as the next argument, and a
 // short token is a *cluster* whose letters are separate options until one takes
 // a value and swallows the rest.
-func checkGitArgs(subcmd string, parts []string) error {
+// It also reports whether the caller already supplied a pathspec, which is what
+// confineToBase needs to know before adding one of its own.
+func checkGitArgs(subcmd string, parts []string, confined bool) (hasPathspec bool, err error) {
 	var (
 		pendingFlag string   // option still waiting for its value
 		pendingKind gitValue // what that value must be
@@ -59,8 +72,8 @@ func checkGitArgs(subcmd string, parts []string) error {
 
 	for _, a := range parts {
 		if pendingFlag != "" {
-			if err := checkGitValue(pendingFlag, pendingKind, a); err != nil {
-				return err
+			if err := checkGitValue(pendingFlag, pendingKind, a, confined); err != nil {
+				return false, err
 			}
 			pendingFlag = ""
 			continue
@@ -72,31 +85,37 @@ func checkGitArgs(subcmd string, parts []string) error {
 		if !endOfOpts && len(a) > 1 && a[0] == '-' {
 			var err error
 			if strings.HasPrefix(a, "--") {
-				pendingFlag, pendingKind, err = checkLongOption(subcmd, a)
+				pendingFlag, pendingKind, err = checkLongOption(subcmd, a, confined)
 			} else {
-				pendingFlag, pendingKind, err = checkShortCluster(subcmd, a)
+				pendingFlag, pendingKind, err = checkShortCluster(subcmd, a, confined)
 			}
 			if err != nil {
-				return err
+				return false, err
 			}
 			continue
 		}
 		// An operand: a pathspec, or a revision that must not name a path
 		// outside base. checkGitOperand accepts both — a rev range like
 		// "main..feature" has no ".." path segment.
-		if err := checkGitOperand(a); err != nil {
-			return err
+		if err := checkGitOperand(a, confined); err != nil {
+			return false, err
+		}
+		// After "--" every operand is a pathspec. Before it, that depends on
+		// the subcommand: status and add take pathspecs, while diff, log and
+		// show take revisions.
+		if endOfOpts || gitPathspecOperands[subcmd] {
+			hasPathspec = true
 		}
 	}
 	if pendingFlag != "" {
-		return fmt.Errorf("git option %q is missing its value", pendingFlag)
+		return false, fmt.Errorf("git option %q is missing its value", pendingFlag)
 	}
-	return nil
+	return hasPathspec, nil
 }
 
 // checkLongOption validates a --opt or --opt=value token. It returns the flag
 // still owed a value, if the value was not attached.
-func checkLongOption(subcmd, token string) (string, gitValue, error) {
+func checkLongOption(subcmd, token string, confined bool) (string, gitValue, error) {
 	flag, attached := token, ""
 	hasAttached := false
 	if i := strings.IndexByte(token, '='); i > 0 {
@@ -116,7 +135,7 @@ func checkLongOption(subcmd, token string) (string, gitValue, error) {
 		return "", valNone, nil
 	}
 	if hasAttached {
-		return "", valNone, checkGitValue(flag, opt.val, attached)
+		return "", valNone, checkGitValue(flag, opt.val, attached, confined)
 	}
 	// An optional value is only ever the attached one. Letting it reach for the
 	// next argument would hand `log --decorate ../secret` to the flag instead of
@@ -136,7 +155,7 @@ func checkLongOption(subcmd, token string) (string, gitValue, error) {
 // need. `commit -am "fix: x"` works because -a takes no value and -m then owns
 // the next argument; `tag -F/etc/passwd` is refused because -F is denied on the
 // first letter, before its glued value is ever considered.
-func checkShortCluster(subcmd, token string) (string, gitValue, error) {
+func checkShortCluster(subcmd, token string, confined bool) (string, gitValue, error) {
 	rest := token[1:]
 	// `git log -5` is --max-count=5. Digits are not options to look up.
 	if gitNumericShorthand[subcmd] && allDigits(rest) {
@@ -164,7 +183,7 @@ func checkShortCluster(subcmd, token string) (string, gitValue, error) {
 		if !opt.glue {
 			return "", valNone, fmt.Errorf("git option %q must be separated from its value", flag)
 		}
-		return "", valNone, checkGitValue(flag, opt.val, glued)
+		return "", valNone, checkGitValue(flag, opt.val, glued, confined)
 	}
 	return "", valNone, nil
 }
@@ -185,10 +204,10 @@ func allDigits(s string) bool {
 // checkGitValue applies the path rules to an option's value. Free text and
 // opaque values (messages, patterns, format strings, numbers) are exempt: a
 // commit message may legitimately be absolute or contain "..".
-func checkGitValue(flag string, kind gitValue, value string) error {
+func checkGitValue(flag string, kind gitValue, value string, confined bool) error {
 	switch kind {
 	case valPath, valRef:
-		if err := checkGitOperand(value); err != nil {
+		if err := checkGitOperand(value, confined); err != nil {
 			return fmt.Errorf("%s: %w", flag, err)
 		}
 	}
@@ -211,7 +230,12 @@ func unknownGitOption(subcmd, flag string) error {
 }
 
 // checkGitOperand rejects an argument that would resolve outside base.
-func checkGitOperand(a string) error {
+//
+// confined is set when base sits below the worktree root, where the pathspec
+// appended by confineToBase is the thing keeping output inside base. That
+// pathspec only constrains *path* resolution, so when it is load-bearing the
+// operand must not be allowed to name an object directly instead.
+func checkGitOperand(a string, confined bool) error {
 	// Pathspec magic re-anchors a path at the repository root regardless of
 	// cmd.Dir, so ":/" and ":(top)" reach above base without containing "..".
 	if strings.HasPrefix(a, ":") {
@@ -230,7 +254,34 @@ func checkGitOperand(a string) error {
 			return fmt.Errorf("path %q escapes base", a)
 		}
 	}
+	if confined {
+		// `show HEAD^{tree}` lists the whole worktree, and `show <blob-sha>`
+		// prints a file's contents outright — neither goes through path
+		// resolution, so the "." pathspec does not touch them. Object ids come
+		// from `status --porcelain=v2`, which reports them for files above base.
+		if strings.Contains(a, "^{") {
+			return fmt.Errorf("object peel syntax %q not allowed", a)
+		}
+		if looksLikeObjectID(a) {
+			return fmt.Errorf("raw object id %q not allowed — name a revision instead", a)
+		}
+	}
 	return nil
+}
+
+// looksLikeObjectID reports whether a is a bare abbreviated or full SHA. git
+// resolves such an argument to whatever object it names, including a blob.
+func looksLikeObjectID(a string) bool {
+	if len(a) < 7 || len(a) > 64 {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		c := a[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // confineToBase appends a "." pathspec to a whole-repository subcommand that
@@ -240,17 +291,13 @@ func checkGitOperand(a string) error {
 // git's history simplification, which silently drops merge and empty commits —
 // so at the root, where confinement buys nothing, adding one would corrupt the
 // history the model reads.
-func confineToBase(parts []string, atRepoRoot bool) []string {
-	if atRepoRoot || !gitReadsWholeRepo[parts[0]] {
+func confineToBase(parts []string, atRepoRoot, hasPathspec bool) []string {
+	// hasPathspec comes from the argument walk, which knows that a bare
+	// trailing "--" is an *empty* pathspec meaning the whole repository, and
+	// that a bare operand is a pathspec for status and add but a revision for
+	// diff, log and show.
+	if atRepoRoot || hasPathspec || !gitReadsWholeRepo[parts[0]] {
 		return parts
-	}
-	for i, a := range parts[1:] {
-		// A bare trailing "--" is an *empty* pathspec, which means the whole
-		// repository — treating it as "the caller supplied one" reopened the
-		// hole it was meant to close.
-		if a == "--" && i+2 < len(parts) {
-			return parts
-		}
 	}
 	return append(append([]string{}, parts...), "--", ".")
 }
@@ -321,10 +368,12 @@ func NewGitTool(base string) Tool {
 			if !gitAllowed[parts[0]] {
 				return "", fmt.Errorf("git subcommand %q not allowed", parts[0])
 			}
-			if err := checkGitArgs(parts[0], parts[1:]); err != nil {
+			atRoot := root.atRoot(ctx, base)
+			hasPathspec, err := checkGitArgs(parts[0], parts[1:], !atRoot)
+			if err != nil {
 				return "", err
 			}
-			parts = confineToBase(parts, root.atRoot(ctx, base))
+			parts = confineToBase(parts, atRoot, hasPathspec)
 			cctx, cancel := context.WithTimeout(ctx, commandTimeout())
 			defer cancel()
 			c := exec.CommandContext(cctx, "git", parts...)

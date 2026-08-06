@@ -49,14 +49,25 @@ type gitOpt struct {
 	optional bool
 }
 
-// gitCommonOpts are accepted for every allowlisted subcommand.
+// gitCommonOpts are accepted for every allowlisted subcommand, so only
+// spellings that mean the same thing everywhere belong here.
+//
+// The short forms deliberately do not: `-v` is --verbose for status, add,
+// commit and branch, but --verify for tag, where it shells out to gpg. Putting
+// it here admitted `git tag -v` past the per-subcommand table that excludes
+// --verify. Short letters are listed per subcommand instead.
 var gitCommonOpts = map[string]gitOpt{
-	"--quiet":    {},
-	"-q":         {},
-	"--verbose":  {},
-	"-v":         {},
 	"--color":    {val: valOpaque, optional: true},
 	"--no-color": {},
+}
+
+// verboseQuiet is the -v/-q pair, for the subcommands where those letters
+// really do mean verbose and quiet.
+var verboseQuiet = map[string]gitOpt{
+	"--verbose": {},
+	"-v":        {},
+	"--quiet":   {},
+	"-q":        {},
 }
 
 // gitNumericShorthand lists subcommands where a bare -<n> means --max-count=<n>.
@@ -120,7 +131,7 @@ var revDisplayOpts = map[string]gitOpt{
 
 // gitOptions is the per-subcommand allowlist.
 var gitOptions = map[string]map[string]gitOpt{
-	"status": {
+	"status": mergeGitOpts(verboseQuiet, map[string]gitOpt{
 		"--short":           {},
 		"-s":                {},
 		"--long":            {},
@@ -134,7 +145,7 @@ var gitOptions = map[string]map[string]gitOpt{
 		"--find-renames":    {val: valOpaque, optional: true},
 		"--no-renames":      {},
 		"--column":          {val: valOpaque, optional: true},
-	},
+	}),
 
 	"diff": mergeGitOpts(diffDisplayOpts, map[string]gitOpt{
 		"--cached":     {},
@@ -143,6 +154,8 @@ var gitOptions = map[string]map[string]gitOpt{
 	}),
 
 	"log": mergeGitOpts(diffDisplayOpts, revDisplayOpts, map[string]gitOpt{
+		"--quiet":              {},
+		"-q":                   {},
 		"--graph":              {},
 		"--max-count":          {val: valOpaque},
 		"-n":                   {val: valOpaque, glue: true},
@@ -190,10 +203,12 @@ var gitOptions = map[string]map[string]gitOpt{
 	}),
 
 	"show": mergeGitOpts(diffDisplayOpts, revDisplayOpts, map[string]gitOpt{
+		"--quiet":    {},
+		"-q":         {},
 		"--no-notes": {},
 	}),
 
-	"branch": {
+	"branch": mergeGitOpts(verboseQuiet, map[string]gitOpt{
 		"--list":            {},
 		"-l":                {},
 		"--all":             {},
@@ -221,10 +236,12 @@ var gitOptions = map[string]map[string]gitOpt{
 		"--track":           {val: valOpaque, optional: true},
 		"--no-track":        {},
 		"--set-upstream-to": {val: valRef},
+		"-u":                {val: valRef}, // for branch -u is --set-upstream-to
 		"--unset-upstream":  {},
-	},
+		"-t":                {val: valOpaque, optional: true}, // --track
+	}),
 
-	"add": {
+	"add": mergeGitOpts(verboseQuiet, map[string]gitOpt{
 		"--all":            {},
 		"-A":               {},
 		"--no-all":         {},
@@ -243,9 +260,9 @@ var gitOptions = map[string]map[string]gitOpt{
 		"--ignore-missing": {},
 		"--sparse":         {},
 		"--chmod":          {val: valOpaque},
-	},
+	}),
 
-	"commit": {
+	"commit": mergeGitOpts(verboseQuiet, map[string]gitOpt{
 		"--message":             {val: valText, glue: true},
 		"-m":                    {val: valText, glue: true},
 		"--all":                 {},
@@ -272,7 +289,7 @@ var gitOptions = map[string]map[string]gitOpt{
 		"--only":                {},
 		"--include":             {},
 		"-i":                    {},
-	},
+	}),
 
 	"tag": {
 		"--list":        {},
