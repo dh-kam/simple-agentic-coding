@@ -37,105 +37,177 @@ var gitDeniedFlags = []string{
 	"--file", "-F", "--pathspec-from-file", "--template", "--add-file",
 }
 
-// gitValueFlags are keyed by subcommand because the same letter means
-// different things: `-m` is a message for commit and tag, but a boolean
-// ("diff for merges") for log, show and diff. Scoping them is what stops
-// `log -p -m ../secret.txt` — where -m consumes nothing — from carrying its
-// neighbour past the path check.
-//
-// Only flags whose operand is genuinely free text belong here: a commit
-// message or a --grep pattern may legitimately be absolute or contain "..".
-var gitValueFlags = map[string]map[string]bool{
-	"commit": {"-m": true, "--message": true, "--author": true, "--date": true},
-	"tag":    {"-m": true, "--message": true},
-	"branch": {"-m": true, "-M": true, "--edit-description": true},
-	"log":    {"--grep": true, "--author": true, "--since": true, "--until": true, "--format": true, "--pretty": true},
-	"show":   {"--format": true, "--pretty": true},
-	"diff":   {"--diff-filter": true},
-}
-
 // gitReadsWholeRepo lists subcommands that ignore cmd.Dir and report on the
 // entire repository. When base is a subdirectory they would show files the
 // rest of the tool surface keeps out of reach, so a "." pathspec is appended
 // unless the caller supplied one.
 var gitReadsWholeRepo = map[string]bool{"diff": true, "log": true, "show": true}
 
-// gitShortValueFlags are single-letter options that take a value, which git
-// also accepts glued to the letter with no separator: `-F/etc/passwd` is one
-// token. Splitting only these avoids mangling short option clusters like -am.
+// checkGitArgs validates one invocation against the option allowlist in
+// gitopts.go. Anything not listed there is refused.
 //
-//	-F file  -L <range>:<file>  -O order-file  -t template
-const gitShortValueFlags = "FLOt"
+// The walk mirrors git's own parse-options: "--" ends option parsing, a long
+// option may carry its value as --opt=value or as the next argument, and a
+// short token is a *cluster* whose letters are separate options until one takes
+// a value and swallows the rest.
+func checkGitArgs(subcmd string, parts []string) error {
+	var (
+		pendingFlag string   // option still waiting for its value
+		pendingKind gitValue // what that value must be
+		endOfOpts   bool     // a "--" has been seen; everything after is a pathspec
+	)
 
-// splitGitFlag separates a token into its option and any value attached to it,
-// covering both `--opt=value` and `-Xvalue`.
-func splitGitFlag(a string) (flag, attached string) {
-	if i := strings.IndexByte(a, '='); i > 0 {
-		return a[:i], a[i+1:]
+	for _, a := range parts {
+		if pendingFlag != "" {
+			if err := checkGitValue(pendingFlag, pendingKind, a); err != nil {
+				return err
+			}
+			pendingFlag = ""
+			continue
+		}
+		if !endOfOpts && a == "--" {
+			endOfOpts = true
+			continue
+		}
+		if !endOfOpts && len(a) > 1 && a[0] == '-' {
+			var err error
+			if strings.HasPrefix(a, "--") {
+				pendingFlag, pendingKind, err = checkLongOption(subcmd, a)
+			} else {
+				pendingFlag, pendingKind, err = checkShortCluster(subcmd, a)
+			}
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		// An operand: a pathspec, or a revision that must not name a path
+		// outside base. checkGitOperand accepts both — a rev range like
+		// "main..feature" has no ".." path segment.
+		if err := checkGitOperand(a); err != nil {
+			return err
+		}
 	}
-	if len(a) > 2 && a[0] == '-' && a[1] != '-' &&
-		strings.IndexByte(gitShortValueFlags, a[1]) >= 0 {
-		return a[:2], a[2:]
+	if pendingFlag != "" {
+		return fmt.Errorf("git option %q is missing its value", pendingFlag)
 	}
-	return a, ""
+	return nil
 }
 
-// isMessageCluster reports whether a short option cluster ends in -m, so the
-// next token is a commit or tag message rather than a path. `commit -am "fix:
-// crash"` is the everyday form, and its message must not be path-checked.
-func isMessageCluster(a string) bool {
-	if len(a) < 2 || a[0] != '-' || a[1] == '-' || a[len(a)-1] != 'm' {
+// checkLongOption validates a --opt or --opt=value token. It returns the flag
+// still owed a value, if the value was not attached.
+func checkLongOption(subcmd, token string) (string, gitValue, error) {
+	flag, attached := token, ""
+	hasAttached := false
+	if i := strings.IndexByte(token, '='); i > 0 {
+		flag, attached, hasAttached = token[:i], token[i+1:], true
+	}
+	if err := gitFlagDenied(flag); err != nil {
+		return "", valNone, err
+	}
+	opt, ok := lookupGitOpt(subcmd, flag)
+	if !ok {
+		return "", valNone, unknownGitOption(subcmd, flag)
+	}
+	if opt.val == valNone {
+		if hasAttached {
+			return "", valNone, fmt.Errorf("git option %q takes no value", flag)
+		}
+		return "", valNone, nil
+	}
+	if hasAttached {
+		return "", valNone, checkGitValue(flag, opt.val, attached)
+	}
+	// An optional value is only ever the attached one. Letting it reach for the
+	// next argument would hand `log --decorate ../secret` to the flag instead of
+	// path-checking it as an operand.
+	if opt.optional {
+		return "", valNone, nil
+	}
+	return flag, opt.val, nil
+}
+
+// checkShortCluster walks a short-option token letter by letter, the way git's
+// parse-options does: each letter is its own option, and the first one that
+// takes a value swallows the remainder of the token — or, when nothing is left,
+// the next argument.
+//
+// Handling clusters generally is what removes the special cases this used to
+// need. `commit -am "fix: x"` works because -a takes no value and -m then owns
+// the next argument; `tag -F/etc/passwd` is refused because -F is denied on the
+// first letter, before its glued value is ever considered.
+func checkShortCluster(subcmd, token string) (string, gitValue, error) {
+	rest := token[1:]
+	// `git log -5` is --max-count=5. Digits are not options to look up.
+	if gitNumericShorthand[subcmd] && allDigits(rest) {
+		return "", valNone, nil
+	}
+	for i := 0; i < len(rest); i++ {
+		flag := "-" + string(rest[i])
+		if err := gitFlagDenied(flag); err != nil {
+			return "", valNone, err
+		}
+		opt, ok := lookupGitOpt(subcmd, flag)
+		if !ok {
+			return "", valNone, unknownGitOption(subcmd, flag)
+		}
+		if opt.val == valNone {
+			continue
+		}
+		glued := rest[i+1:]
+		if glued == "" {
+			if opt.optional {
+				return "", valNone, nil // -M with no digits: no value at all
+			}
+			return flag, opt.val, nil // the value is the next argument
+		}
+		if !opt.glue {
+			return "", valNone, fmt.Errorf("git option %q must be separated from its value", flag)
+		}
+		return "", valNone, checkGitValue(flag, opt.val, glued)
+	}
+	return "", valNone, nil
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits.
+func allDigits(s string) bool {
+	if s == "" {
 		return false
 	}
-	for _, c := range a[1:] {
-		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z') {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
 			return false
 		}
 	}
 	return true
 }
 
-// checkGitArgs rejects flags and operands that would let an allowlisted
-// subcommand read or write outside base. subcmd selects the value-flag set.
-func checkGitArgs(subcmd string, parts []string) error {
-	valueFlags := gitValueFlags[subcmd]
-	skipPathCheck := false
-	for _, a := range parts {
-		flag, attached := splitGitFlag(a)
-
-		// Denied flags are checked on *every* argument, including one that
-		// follows a value flag. Skipping the whole token instead let a boolean
-		// use of a value flag smuggle the next one through.
-		for _, denied := range gitDeniedFlags {
-			if flag == denied {
-				return fmt.Errorf("git flag %q not allowed", flag)
-			}
-		}
-		// An attached value hides inside a token that starts with "-", so it
-		// never reached the operand checks below: --file=/etc/passwd read any
-		// file on the host.
-		if attached != "" && !valueFlags[flag] {
-			if err := checkGitOperand(attached); err != nil {
-				return fmt.Errorf("%s: %w", flag, err)
-			}
-		}
-
-		if skipPathCheck {
-			skipPathCheck = false
-			continue
-		}
-		if valueFlags[flag] || (valueFlags["-m"] && isMessageCluster(a)) {
-			skipPathCheck = attached == ""
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
-		if err := checkGitOperand(a); err != nil {
-			return err
+// checkGitValue applies the path rules to an option's value. Free text and
+// opaque values (messages, patterns, format strings, numbers) are exempt: a
+// commit message may legitimately be absolute or contain "..".
+func checkGitValue(flag string, kind gitValue, value string) error {
+	switch kind {
+	case valPath, valRef:
+		if err := checkGitOperand(value); err != nil {
+			return fmt.Errorf("%s: %w", flag, err)
 		}
 	}
 	return nil
+}
+
+// gitFlagDenied is a second line of defence behind the allowlist: these must
+// never run even if one is mistakenly added to the option table.
+func gitFlagDenied(flag string) error {
+	for _, denied := range gitDeniedFlags {
+		if flag == denied {
+			return fmt.Errorf("git flag %q not allowed", flag)
+		}
+	}
+	return nil
+}
+
+func unknownGitOption(subcmd, flag string) error {
+	return fmt.Errorf("git option %q is not allowed for %q — the git tool accepts a fixed set of options; use run_command for anything else", flag, subcmd)
 }
 
 // checkGitOperand rejects an argument that would resolve outside base.

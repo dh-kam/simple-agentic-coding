@@ -75,7 +75,8 @@ examples/mcp-echo/   검증용 최소 stdio MCP 서버(echo 도구) — go build
 
 - 파일 도구는 `base` 밖을 읽거나 쓰지 못한다. 모든 경로 구성요소에서 symlink 를 해석하고, 아직 없는 파일도 존재하는 최상위 조상까지 검사하며, dangling symlink 는 거부한다. 쓰기는 `O_NOFOLLOW`.
 - `.git/` 과 `.agentic/` 은 어떤 도구로도 수정할 수 없다. hook·permission 규칙·skill 은 곧 다음 세션의 임의 실행이기 때문이다.
-- `git` 도구는 subcommand allowlist 에 더해 인자까지 검사한다. `config`/`remote`/`stash` 는 실행 불가, `--output`·`--no-index`·`--file` 계열은 거부, 절대 경로·`..`·pathspec magic(`:/`)·`<rev>:<path>` 도 거부, base 가 하위 디렉토리면 `-- .` 로 한정한다.
+- `git` 도구는 **subcommand 와 옵션을 모두 allowlist 로** 통과시킨다(`agent/gitopts.go`). git 2.43 의 옵션은 허용된 10개 subcommand 에 걸쳐 900개가 넘지만, 여기 등재된 것은 코딩 에이전트가 실제로 쓰는 부분집합뿐이고 **나머지는 전부 거부**된다 — 앞으로 git 이 추가할 옵션도 포함해서. 값의 종류(자유 텍스트·ref·pathspec·숫자)에 따라 검사 방식이 달라져, 커밋 메시지는 `..`나 절대 경로를 담아도 되지만 pathspec 은 그럴 수 없다. `config`/`remote`/`stash` 는 subcommand 단계에서 막히고, 절대 경로·`..`·pathspec magic(`:/`)·`<rev>:<path>` 는 거부되며, base 가 하위 디렉토리면 `-- .` 로 한정한다.
+  거부는 막다른 길이 아니라 우회로 안내다: 허용되지 않은 조합은 `run_command` 로 실행할 수 있고, 그쪽은 그 자체로 승인 게이트를 거친다.
 - `web_fetch` 는 사설·loopback·link-local·CGNAT 등 비공개 대역을 차단하고, 검증한 IP 로 dial 을 고정하며, 리다이렉트마다 재검증·재고정한다.
 - `task` 서브에이전트는 부모의 승인 게이트를 상속하고, `disable_tools` 도 그대로 적용받는다.
 

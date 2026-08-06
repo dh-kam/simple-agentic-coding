@@ -1480,19 +1480,56 @@ func TestCheckGitArgs_shortMessageClusters(t *testing.T) {
 	}
 }
 
-func TestSplitGitFlag(t *testing.T) {
-	for _, c := range []struct{ in, flag, val string }{
-		{"--file=/etc/passwd", "--file", "/etc/passwd"},
-		{"-F/etc/passwd", "-F", "/etc/passwd"},
-		{"-L1,1:../x", "-L", "1,1:../x"},
-		{"-am", "-am", ""}, // not a value-taking short option: left intact
-		{"-p", "-p", ""},
-		{"--stat", "--stat", ""},
-		{"HEAD", "HEAD", ""},
+// The cluster walk mirrors git's parse-options: each letter is its own option
+// until one takes a value and swallows the rest of the token.
+func TestCheckShortCluster(t *testing.T) {
+	for _, c := range []struct {
+		subcmd, token string
+		wantPending   string // flag still owed a value, "" if none
+		wantErr       bool
+	}{
+		{"commit", "-am", "-m", false},    // -a boolean, -m owns the next argument
+		{"commit", "-m", "-m", false},     // plain message flag
+		{"commit", "-mfix: x", "", false}, // glued message, consumed here
+		{"log", "-p", "", false},
+		{"log", "-pn", "-n", false}, // -p boolean, -n owns the next argument
+		{"log", "-n5", "", false},   // glued count
+		{"log", "-5", "", false},    // bare number is --max-count
+		{"log", "-pm", "", true},    // -m is not an option of log
+		{"tag", "-F/etc/passwd", "", true},
+		{"commit", "-F/etc/passwd", "", true},
+		{"log", "-O/etc/passwd", "", true},
+		{"diff", "-zzz", "", true}, // unknown letter
 	} {
-		flag, val := splitGitFlag(c.in)
-		if flag != c.flag || val != c.val {
-			t.Errorf("splitGitFlag(%q) = %q,%q want %q,%q", c.in, flag, val, c.flag, c.val)
+		pending, _, err := checkShortCluster(c.subcmd, c.token)
+		if (err != nil) != c.wantErr {
+			t.Errorf("checkShortCluster(%q, %q) err=%v, wantErr=%v", c.subcmd, c.token, err, c.wantErr)
+			continue
+		}
+		if err == nil && pending != c.wantPending {
+			t.Errorf("checkShortCluster(%q, %q) pending=%q want %q", c.subcmd, c.token, pending, c.wantPending)
+		}
+	}
+}
+
+// An optional value is only ever the attached one, so the flag must not reach
+// for the following argument and steal it from the operand path check.
+func TestCheckGitArgs_optionalValuesDoNotEatOperands(t *testing.T) {
+	for _, args := range [][]string{
+		{"--decorate", "../secret.txt"},
+		{"--stat", "../secret.txt"},
+		{"--abbrev", "../secret.txt"},
+	} {
+		if err := checkGitArgs("log", args); err == nil {
+			t.Errorf("git log %q was allowed; the optional-value flag swallowed the operand", args)
+		}
+	}
+	// the attached forms still work
+	for _, args := range [][]string{
+		{"--decorate=short"}, {"--stat=200"}, {"--abbrev=8"}, {"-M50"}, {"-U3"},
+	} {
+		if err := checkGitArgs("log", args); err != nil {
+			t.Errorf("git log %q rejected: %v", args, err)
 		}
 	}
 }
